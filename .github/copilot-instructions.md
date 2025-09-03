@@ -38,6 +38,33 @@ When adding new modules or content:
 - Test all code examples for accuracy
 - Consider multiple programming languages when applicable
 
+### Simplicity and Beginner-Friendly Requirements
+
+**Keep It Simple:**
+- Each course should be as simple as possible
+- Minimize the number of files in each module (ideally just README.md + 1-2 example files)
+- Reduce unnecessary noise and complexity
+- Focus on one core concept per module
+
+**Beginner-Friendly Design:**
+- Make content immediately understandable to beginners
+- Use clear, straightforward language
+- Provide step-by-step instructions
+- Avoid overwhelming technical jargon
+
+**Example Requirements:**
+- Examples must be simple and direct
+- Examples should be directly related to the current topic
+- Avoid complex scenarios that might confuse learners
+- Each example should demonstrate exactly one GitHub Copilot feature
+- Code examples should be minimal but complete
+
+**File Structure Guidelines:**
+- Maximum 3-4 files per module (including README.md)
+- Avoid nested subdirectories unless absolutely necessary
+- Each file should have a clear, single purpose
+- Remove any files that don't directly support the learning objective
+
 ## Usage Instructions
 
 1. Navigate to individual module directories
