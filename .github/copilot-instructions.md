@@ -1,68 +1,49 @@
-# Project Coding Standards
+# GitHub Copilot Tutorial Project Instructions
 
-## Naming Conventions
-- Use camelCase for variables and functions
-- Use PascalCase for classes and constructors
-- Use UPPER_SNAKE_CASE for constants
-- Use kebab-case for file names
+## Project Overview
 
-## Code Style
-- Use 2 spaces for indentation
-- Use single quotes for strings
-- No semicolons at line endings (unless necessary)
-- Maximum line length of 100 characters
+This is an educational project designed to help developers master GitHub Copilot effectively. The project serves as a comprehensive learning resource for understanding and utilizing GitHub Copilot's capabilities across various programming scenarios and languages.
 
-## Function Standards
-- Functions must have JSDoc comments
-- Parameters and return values must have type descriptions
-- Complex logic must include example code
-- Use async/await instead of Promise.then()
+## Project Structure
 
-## Error Handling
-- Wrap async operations with try/catch
-- Error messages must include context information
-- Log errors for debugging purposes
-- Provide user-friendly error messages
+### Directory Organization
+- Each learning module is organized in a dedicated directory
+- Directory naming convention: `{two-digit-number}-{topic-name}`
+  - Example: `01-basic-completion`, `02-comment-driven`, etc.
+- Sequential numbering ensures a logical learning progression
 
-## Comment Standards
-- Code must have clear comments explaining business logic
-- TODO comments must include assignee and timestamp
-- Complex algorithms must have step-by-step explanations
-- API interfaces must have complete documentation comments
+### Content Structure
+- **Required**: Each directory must contain a `README.md` file explaining the topic
+- **Flexible**: Additional content can be implemented in any programming language
+  - Node.js/JavaScript
+  - Python
+  - Java
+  - Any other programming language suitable for the learning objective
 
-## Example Code Style
-```javascript
-/**
- * User authentication service
- * @param {string} email - User email address
- * @param {string} password - User password
- * @returns {Promise<{success: boolean, token?: string, error?: string}>}
- * @example
- * const result = await authenticateUser('user@example.com', 'password123')
- * if (result.success) {
- *   console.log('Login successful:', result.token)
- * }
- */
-async function authenticateUser(email, password) {
-  try {
-    // Validate user input
-    if (!email || !password) {
-      return { success: false, error: 'Email and password are required' }
-    }
-    
-    // Find user and verify password
-    const user = await User.findOne({ email })
-    const isValid = await bcrypt.compare(password, user.password)
-    
-    if (isValid) {
-      const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET)
-      return { success: true, token }
-    }
-    
-    return { success: false, error: 'Invalid email or password' }
-  } catch (error) {
-    console.error('Authentication failed:', error.message)
-    return { success: false, error: 'Internal server error' }
-  }
-}
-```
+## Educational Objectives
+
+This tutorial project aims to:
+1. Provide hands-on experience with GitHub Copilot features
+2. Demonstrate best practices for AI-assisted coding
+3. Cover various use cases and scenarios
+4. Support multiple programming languages and frameworks
+5. Enable progressive learning through structured modules
+
+## Contributing Guidelines
+
+When adding new modules or content:
+- Follow the established directory naming convention
+- Include comprehensive README.md documentation
+- Ensure code examples are clear and educational
+- Test all code examples for accuracy
+- Consider multiple programming languages when applicable
+
+## Usage Instructions
+
+1. Navigate to individual module directories
+2. Read the README.md for specific learning objectives
+3. Follow the step-by-step instructions
+4. Practice with the provided code examples
+5. Experiment with GitHub Copilot features as described
+
+This project is designed to be a living educational resource that grows with the evolving capabilities of GitHub Copilot.
