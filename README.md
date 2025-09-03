@@ -10,6 +10,13 @@ GitHub Copilot 在 VS Code 中的功能学习教程，通过模块化课程帮�
 - 搜索引擎 API Key 配置
 - 联网搜索使用方法
 
+#### [02 - 使用 GitHub Copilot 执行 kubectl 命令](./02-kubectl-with-copilot/)
+学习如何使用 GitHub Copilot 生成和执行复杂的 kubectl 命令
+- 基础 kubectl 查询命令生成
+- 复杂资源筛选和格式化
+- 故障排查和日志分析
+- 实践练习和最佳实践
+
 ## 前置要求
 
 - ✅ [Visual Studio Code](https://code.visualstudio.com/)
