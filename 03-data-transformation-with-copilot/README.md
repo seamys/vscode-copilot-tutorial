@@ -1,14 +1,3 @@
-# GitHub Copilot 数据转换与网页抓取教程
-
-## 📚 学习目标
-
-本教程将教你如何使用 GitHub Copilot 来：
-- 实现网页数据抓取
-- 使用正则表达式清理数据
-- 进行数据格式转换
-- 创建结构化 JSON 输出
-- 实现错误处理和进度显示
-
 ## 🎯 任务描述
 
 从维基百科 [国家人口列表页面](https://en.wikipedia.org/wiki/List_of_countries_and_dependencies_by_population) 抓取国家人口数据，转换为指定JSON格式并保存文件。

@@ -17,6 +17,26 @@ GitHub Copilot 在 VS Code 中的功能学习教程，通过模块化课程帮�
 - 故障排查和日志分析
 - 实践练习和最佳实践
 
+#### [03 - 数据转换与处理](./03-data-transformation-with-copilot/)
+使用 GitHub Copilot 进行数据转换和处理任务
+- 数据格式转换和清理
+- 复杂数据处理逻辑
+- 自动化数据分析脚本
+
+#### [04 - 旧代码分析](./04-legacy-code-analysis/)
+使用 GitHub Copilot 分析和理解遗留代码
+- 快速理解缺乏文档的复杂代码库
+- 语义化搜索和功能定位
+- 代码解释和文档生成
+- 架构分析和重构建议
+
+#### [05 - OpenAPI规范阅读与API文档生成](./05-openapi-doc-generation/)
+通过阅读 OpenAPI 规范快速生成高质量API文档
+- 分析和理解 OpenAPI 规范文件
+- 自动生成用户友好的API文档
+- 创建多语言API使用示例
+- 生成测试用例和集成指南
+
 ## 前置要求
 
 - ✅ [Visual Studio Code](https://code.visualstudio.com/)
