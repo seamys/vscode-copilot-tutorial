@@ -1,0 +1,3038 @@
+linux-kernel.vger.kernel.org archive mirror
+ help / color / mirror / Atom feed
+* [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing
+@ 2025-09-04  4:14 K Prateek Nayak
+  2025-09-04  4:14 ` [RFC PATCH 01/19] sched/fair: Simplify set_cpu_sd_state_*() with guards K Prateek Nayak
+                   ` (18 more replies)
+  0 siblings, 19 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:14 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Hello folks,
+
+Introduction
+============
+
+Atomic operations on a single global variable is costly and may result
+in noticeable performance overhead as highlighted by reports in
+[1][2][3]. Peter noted that the "nohz.idle_cpus_maks" and "nohz.nr_cpus"
+can become the next point of contention when reviewing the push based
+load balancing series [4] and favored the idea of splitting the global
+cpumask and the idle state indicator into per-LLC ones.
+
+Global indicators have a few key advantages, namely:
+
+- It is independent of the sd hierarchy and is not affected by hotplug
+  or cpuset activity.
+
+- The implementation is simple. Setting the signal is simple and the
+  cpumask traversal is simple.
+
+However, having a distributed tracking infrastructure can significantly
+reduce contention when this data is frequently accessed and modified
+which will be the case when it is used to implement a push-based load
+balancing mechanism for the fair class based off the RFC [5].
+
+
+Implementation
+==============
+
+There are few ideas to split the centralized nohz tracking using the
+sched_domain topology, namely:
+
+1. Maintain a cpumask per sd_llc_shared and starting sd_llc, propagate a
+   signal up the sched domain hierarchy to indicate the presence of
+   "nohz.idle_cpus" in the hierarchy.
+
+   o PROS:
+
+   - Distributed tracking
+   - Atomic updates past the LLC level are only done at the boundary
+     conditions (#idle_cpus in LLC goes from 0 -> 1 or back from 1 -> 0)
+   - During hotplug, the new hierarchy automatically is initialized with
+     the correct nohz idle states (idle_cpus, idle_cpus_mask).
+
+   o CONS:
+
+   - If there are multiple PKG/NODE/NUMA levels above the MC domain,
+     there can be multiple atomic oprations and in exotic topologies
+     with single CPU groups, single CPU transitioning in and out of nohz
+     idle frequently can cause a storm of these atomic operations and
+     interfere with other CPUs in the same hierarchy.
+   - Requires constructing a sd_llc_shared hierarchy to get the full
+     view of the system.
+   - An equivalent view of "nohz.idle_cpus_mask" needs to be constructed
+     by traversing the sd hierarchy.
+
+2. [Implemented in this series] Maintain a cpumask per sd_llc_shared
+   keep track of all sd_llc_shared in a global list.
+
+   o PROS:
+
+   - Distributed tracking
+   - Atomic updates to the central "nohz.nr_cpus" tracking are only done
+     at the boundary conditions when the number of idle_cpus in LLC goes
+     from 0 -> 1 or back from 1 -> 0.
+
+   o CONS:
+
+   - Maintaining the central lists of all the "sd->shared" tracking the
+     nohz idle states of CPUs in a domain addes more complication in the
+     topology bits.
+   - Correcting the nohz signals during hotplug or cpuset activity is
+     tricky since the local "sd->shared" data can influence the global
+     "nohz.nr_doms" indicator.
+   - An equivalent view of "nohz.idle_cpus_mask" needs to be constructed
+     by traversing the global RCU protected "nohz_shared_list".
+
+Since hotplug and cpuset activities are rare, the latter approach is
+implemented as it saves on several atomic operations that can happen
+more frequently.
+
+
+Structure
+=========
+
+The series has been divided as follows:
+
+Patch 01-03 - Trivial cleanup and optimization of the current
+              infrastructure.
+Patch 03-08 - Preparation in topology.c and idle tracking infrastructure
+              to support the distributed tracking.
+Patch 09-11 - Introduced new members for distributed nohz tracking.
+Patch 12-13 - Preparation in fair.c to convert users of
+              "nohz.idle_cpus_mask" to use the new infrastructure.
+Patch 14-17 - Convert the bits that use the centralized nohz tracking to
+              use the distributed version.
+Patch 18    - Convert "nohz.nr_cpus" to "nohz.nr_doms" and optimize the
+              central tracking to only modify the global count at the
+              boundary condition.
+Patch 19    - Simple debug patch for sanity testing.
+
+
+Benchmarking
+============
+
+Following are the results from benchmarking on a dual socket 3rd
+Generation EPYC system with 128C/256T (Boost on, C2 disabled):
+
+    ==================================================================
+    Test          : hackbench
+    Units         : Normalized time in seconds
+    Interpretation: Lower is better
+    Statistic     : AMean
+    ==================================================================
+    Case:           tip[pct imp](CV)       sd_nohz[pct imp](CV)
+     1-groups     1.00 [ -0.00]( 8.58)     0.96 [  3.99]( 5.47)
+     2-groups     1.00 [ -0.00]( 3.53)     1.00 [ -0.00]( 3.57)
+     4-groups     1.00 [ -0.00]( 1.63)     0.98 [  1.88]( 1.46)
+     8-groups     1.00 [ -0.00]( 1.80)     0.99 [  0.68]( 2.12)
+    16-groups     1.00 [ -0.00]( 2.95)     1.01 [ -0.75]( 1.78)
+
+
+    ==================================================================
+    Test          : tbench
+    Units         : Normalized throughput
+    Interpretation: Higher is better
+    Statistic     : AMean
+    ==================================================================
+    Clients:    tip[pct imp](CV)       sd_nohz[pct imp](CV)
+        1     1.00 [  0.00]( 1.34)     1.02 [  2.00]( 0.23)
+        2     1.00 [  0.00]( 0.65)     1.01 [  1.22]( 0.18)
+        4     1.00 [  0.00]( 0.58)     1.00 [  0.17]( 0.77)
+        8     1.00 [  0.00]( 0.55)     1.01 [  0.86]( 0.16)
+       16     1.00 [  0.00]( 0.52)     0.99 [ -0.59]( 0.66)
+       32     1.00 [  0.00]( 1.27)     0.99 [ -1.40]( 2.55)
+       64     1.00 [  0.00]( 1.60)     1.00 [ -0.09]( 2.04)
+      128     1.00 [  0.00]( 0.14)     1.02 [  1.55]( 0.79)
+      256     1.00 [  0.00]( 0.75)     1.01 [  1.00]( 1.28)
+      512     1.00 [  0.00]( 0.18)     1.01 [  0.60]( 0.36)
+     1024     1.00 [  0.00]( 0.05)     1.01 [  1.47]( 0.44)
+
+
+    ==================================================================
+    Test          : stream-10
+    Units         : Normalized Bandwidth, MB/s
+    Interpretation: Higher is better
+    Statistic     : HMean
+    ==================================================================
+    Test:       tip[pct imp](CV)       sd_nohz[pct imp](CV)
+     Copy     1.00 [  0.00](10.72)     0.97 [ -2.76](11.31)
+    Scale     1.00 [  0.00]( 5.00)     0.97 [ -3.14]( 7.20)
+      Add     1.00 [  0.00]( 5.75)     0.95 [ -4.71]( 7.33)
+    Triad     1.00 [  0.00]( 5.83)     0.97 [ -2.60](10.21)
+
+
+    ==================================================================
+    Test          : stream-100
+    Units         : Normalized Bandwidth, MB/s
+    Interpretation: Higher is better
+    Statistic     : HMean
+    ==================================================================
+    Test:       tip[pct imp](CV)       sd_nohz[pct imp](CV)
+     Copy     1.00 [  0.00]( 2.31)     1.01 [  0.72]( 1.21)
+    Scale     1.00 [  0.00]( 4.58)     1.00 [  0.44]( 4.69)
+      Add     1.00 [  0.00]( 1.12)     0.99 [ -0.54]( 4.21)
+    Triad     1.00 [  0.00]( 2.21)     0.98 [ -1.82]( 5.94)
+
+
+    ==================================================================
+    Test          : netperf
+    Units         : Normalized Througput
+    Interpretation: Higher is better
+    Statistic     : AMean
+    ==================================================================
+    Clients:         tip[pct imp](CV)       sd_nohz[pct imp](CV)
+     1-clients     1.00 [  0.00]( 0.86)     1.01 [  0.71]( 0.45)
+     2-clients     1.00 [  0.00]( 0.56)     1.01 [  0.86]( 0.63)
+     4-clients     1.00 [  0.00]( 0.50)     1.01 [  0.74]( 0.48)
+     8-clients     1.00 [  0.00]( 0.70)     1.01 [  0.61]( 0.39)
+    16-clients     1.00 [  0.00]( 0.44)     1.00 [  0.49]( 0.57)
+    32-clients     1.00 [  0.00]( 0.54)     1.00 [  0.16]( 0.90)
+    64-clients     1.00 [  0.00]( 1.66)     1.00 [  0.45]( 1.42)
+    128-clients    1.00 [  0.00]( 1.12)     1.01 [  0.57]( 0.91)
+    256-clients    1.00 [  0.00]( 3.98)     0.98 [ -1.70]( 4.77)
+    512-clients    1.00 [  0.00](51.74)     0.97 [ -2.58](44.26)
+
+
+    ==================================================================
+    Test          : schbench
+    Units         : Normalized 99th percentile latency in us
+    Interpretation: Lower is better
+    Statistic     : Median
+    ==================================================================
+    #workers: tip[pct imp](CV)       sd_nohz[pct imp](CV)
+      1     1.00 [ -0.00](15.32)     1.00 [ -0.00]( 8.79)
+      2     1.00 [ -0.00](19.67)     1.00 [ -0.00](10.14)
+      4     1.00 [ -0.00](13.01)     1.06 [ -6.38](15.61)
+      8     1.00 [ -0.00](10.33)     0.98 [  1.79]( 3.21)
+     16     1.00 [ -0.00]( 5.00)     1.02 [ -1.67]( 2.79)
+     32     1.00 [ -0.00]( 1.05)     1.01 [ -1.05]( 8.56)
+     64     1.00 [ -0.00]( 2.37)     0.94 [  5.67]( 0.83)
+    128     1.00 [ -0.00](13.58)     0.90 [  9.98]( 6.67)
+    256     1.00 [ -0.00](34.92)     1.88 [-88.43](12.68)
+    512     1.00 [ -0.00]( 1.72)     1.03 [ -2.57]( 1.26)
+
+
+    ==================================================================
+    Test          : new-schbench-requests-per-second
+    Units         : Normalized Requests per second
+    Interpretation: Higher is better
+    Statistic     : Median
+    ==================================================================
+    #workers: tip[pct imp](CV)       sd_nohz[pct imp](CV)
+      1     1.00 [  0.00]( 0.15)     1.00 [ -0.30]( 0.55)
+      2     1.00 [  0.00]( 0.30)     1.01 [  0.59]( 0.15)
+      4     1.00 [  0.00]( 0.00)     1.00 [  0.00]( 0.15)
+      8     1.00 [  0.00]( 0.15)     1.00 [  0.29]( 0.00)
+     16     1.00 [  0.00]( 0.00)     1.00 [  0.00]( 0.00)
+     32     1.00 [  0.00]( 3.80)     1.05 [  4.86]( 0.55)
+     64     1.00 [  0.00]( 0.20)     0.99 [ -0.76]( 5.08)
+    128     1.00 [  0.00]( 0.20)     1.00 [  0.38]( 0.20)
+    256     1.00 [  0.00]( 0.70)     1.02 [  2.50]( 0.63)
+    512     1.00 [  0.00]( 0.25)     1.01 [  0.95]( 0.00)
+
+
+    ==================================================================
+    Test          : new-schbench-wakeup-latency
+    Units         : Normalized 99th percentile latency in us
+    Interpretation: Lower is better
+    Statistic     : Median
+    ==================================================================
+    #workers: tip[pct imp](CV)       sd_nohz[pct imp](CV)
+      1     1.00 [ -0.00](13.47)     1.14 [-14.29](11.92)
+      2     1.00 [ -0.00](16.40)     1.12 [-12.50]( 0.00)
+      4     1.00 [ -0.00]( 9.94)     0.89 [ 11.11](11.92)
+      8     1.00 [ -0.00]( 5.53)     1.11 [-11.11](14.13)
+     16     1.00 [ -0.00](13.22)     1.00 [ -0.00]( 0.00)
+     32     1.00 [ -0.00](11.71)     0.83 [ 16.67]( 0.00)
+     64     1.00 [ -0.00]( 3.87)     1.08 [ -7.69]( 6.39)
+    128     1.00 [ -0.00]( 3.51)     0.98 [  1.56]( 4.83)
+    256     1.00 [ -0.00]( 4.91)     1.18 [-17.95]( 8.31)
+    512     1.00 [ -0.00]( 0.20)     1.00 [ -0.39]( 0.20)
+
+
+    ==================================================================
+    Test          : new-schbench-request-latency
+    Units         : Normalized 99th percentile latency in us
+    Interpretation: Lower is better
+    Statistic     : Median
+    ==================================================================
+    #workers: tip[pct imp](CV)       sd_nohz[pct imp](CV)
+      1     1.00 [ -0.00]( 0.13)     0.98 [  1.78]( 2.11)
+      2     1.00 [ -0.00]( 0.13)     0.94 [  6.11]( 2.83)
+      4     1.00 [ -0.00]( 2.40)     0.96 [  3.82]( 1.21)
+      8     1.00 [ -0.00]( 0.00)     0.96 [  3.82]( 0.55)
+     16     1.00 [ -0.00]( 2.88)     0.99 [  1.32]( 1.20)
+     32     1.00 [ -0.00](12.96)     0.89 [ 11.17]( 2.34)
+     64     1.00 [ -0.00]( 4.80)     0.99 [  0.88]( 5.56)
+    128     1.00 [ -0.00]( 2.49)     1.02 [ -1.81]( 2.72)
+    256     1.00 [ -0.00]( 3.95)     1.12 [-11.52]( 7.78)
+    512     1.00 [ -0.00]( 0.88)     1.00 [ -0.00]( 1.02)
+
+
+    ==================================================================
+    Test          : Various longer running benchmarks
+    Units         : %diff in throughput reported
+    Interpretation: Higher is better
+    Statistic     : Median
+    ==================================================================
+    Benchmarks:                  %diff
+    ycsb-cassandra               1.36%
+    ycsb-mongodb                -1.66%
+    deathstarbench-1x            0.04%
+    deathstarbench-2x           -0.10%
+    deathstarbench-3x            3.84%
+    deathstarbench-6x            1.54%
+    hammerdb+mysql 16VU          0.03%
+    hammerdb+mysql 64VU          1.22%
+
+
+The schbench datapoints were rerun to discover the regressions are
+mostly the result of run-to-run variance. All the datapoints have
+noticeable variance and the results can swing either way depending on
+the noise in the system.
+
+
+References
+==========
+
+[1] https://lore.kernel.org/lkml/20240531205452.65781-1-tim.c.chen@linux.intel.com/
+[2] https://lore.kernel.org/lkml/20250416035823.1846307-1-tim.c.chen@linux.intel.com/
+[3] https://lore.kernel.org/lkml/20250423174634.3009657-1-edumazet@google.com/
+[4] https://lore.kernel.org/lkml/20250410102945.GD30687@noisy.programming.kicks-ass.net/
+[5] https://lore.kernel.org/lkml/20250409111539.23791-1-kprateek.nayak@amd.com/
+
+This series was tested on tip:sched/core at commit 1b5f1454091e
+("sched/idle: Remove play_idle()") with commit 99b773d720ae ("sched/psi:
+Fix psi_seq initialization") fron v6.17-rc1 cherry-picked on top.
+
+CONFIG_HZ_PERIODIC was only build and boot tested.
+
+The series is based on tip:sched/coreat commit 5b726e9bf954
+("sched/fair: Get rid of throttled_lb_pair()")
+
+Special thanks to Gautham for his help with the tricky bits and an early
+review of the series.
+
+---
+K Prateek Nayak (19):
+  sched/fair: Simplify set_cpu_sd_state_*() with guards
+  sched/topology: Optimize sd->shared allocation and assignment
+  sched/fair: Use rq->nohz_tick_stopped in update_nohz_stats()
+  sched/fair: Use xchg() to set sd->nohz_idle state
+  sched/topology: Attach new hierarchy in rq_attach_root()
+  sched/fair: Fixup sd->nohz_idle state during hotplug / cpuset
+  sched/fair: Account idle cpus instead of busy cpus in sd->shared
+  sched/topology: Introduce fallback sd->shared assignment
+  sched/topology: Introduce percpu sd_nohz for nohz state tracking
+  sched/topology: Introduce "idle_cpus_mask" in sd->shared
+  sched/topology: Introduce "nohz_shared_list" to keep track of
+    sd->shared
+  sched/fair: Reorder the barrier in nohz_balance_enter_idle()
+  sched/fair: Extract the main _nohz_idle_balance() loop into a helper
+  sched/fair: Convert find_new_ilb() to use nohz_shared_list
+  sched/fair: Introduce sched_asym_prefer_idle() for ILB kick
+  sched/fair: Convert sched_balance_nohz_idle() to use nohz_shared_list
+  sched/fair: Remove "nohz.idle_cpus_mask"
+  sched/fair: Optimize global "nohz.nr_cpus" tracking
+  sched/topology: Add basic debug information for "nohz_shared_list"
+
+ include/linux/sched/topology.h |  14 +-
+ kernel/sched/core.c            |   2 +-
+ kernel/sched/fair.c            | 432 ++++++++++++++++++++++++---------
+ kernel/sched/sched.h           |   6 +-
+ kernel/sched/topology.c        | 381 +++++++++++++++++++++++++----
+ 5 files changed, 663 insertions(+), 172 deletions(-)
+
+
+base-commit: 5b726e9bf9544a349090879a513a5e00da486c14
+-- 
+2.34.1
+
+
+^ permalink raw reply	[flat|nested] 20+ messages in thread
+* [RFC PATCH 01/19] sched/fair: Simplify set_cpu_sd_state_*() with guards
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+@ 2025-09-04  4:14 ` K Prateek Nayak
+  2025-09-04  4:14 ` [RFC PATCH 02/19] sched/topology: Optimize sd->shared allocation and assignment K Prateek Nayak
+                   ` (17 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:14 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Simplify set_cpu_sd_state_{busy,idle}() using guard(rcu).
+
+Reviewed-by: Gautham R. Shenoy <gautham.shenoy@amd.com>
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c | 20 ++++++++------------
+ 1 file changed, 8 insertions(+), 12 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index df8dc389af8e..61b59fd75ced 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12449,16 +12449,14 @@ static void set_cpu_sd_state_busy(int cpu)
+ {
+ 	struct sched_domain *sd;
+ 
+-	rcu_read_lock();
+-	sd = rcu_dereference(per_cpu(sd_llc, cpu));
++	guard(rcu)();
+ 
++	sd = rcu_dereference(per_cpu(sd_llc, cpu));
+ 	if (!sd || !sd->nohz_idle)
+-		goto unlock;
+-	sd->nohz_idle = 0;
++		return;
+ 
++	sd->nohz_idle = 0;
+ 	atomic_inc(&sd->shared->nr_busy_cpus);
+-unlock:
+-	rcu_read_unlock();
+ }
+ 
+ void nohz_balance_exit_idle(struct rq *rq)
+@@ -12479,16 +12477,14 @@ static void set_cpu_sd_state_idle(int cpu)
+ {
+ 	struct sched_domain *sd;
+ 
+-	rcu_read_lock();
+-	sd = rcu_dereference(per_cpu(sd_llc, cpu));
++	guard(rcu)();
+ 
++	sd = rcu_dereference(per_cpu(sd_llc, cpu));
+ 	if (!sd || sd->nohz_idle)
+-		goto unlock;
+-	sd->nohz_idle = 1;
++		return;
+ 
++	sd->nohz_idle = 1;
+ 	atomic_dec(&sd->shared->nr_busy_cpus);
+-unlock:
+-	rcu_read_unlock();
+ }
+ 
+ /*
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 02/19] sched/topology: Optimize sd->shared allocation and assignment
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+  2025-09-04  4:14 ` [RFC PATCH 01/19] sched/fair: Simplify set_cpu_sd_state_*() with guards K Prateek Nayak
+@ 2025-09-04  4:14 ` K Prateek Nayak
+  2025-09-04  4:14 ` [RFC PATCH 03/19] sched/fair: Use rq->nohz_tick_stopped in update_nohz_stats() K Prateek Nayak
+                   ` (16 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:14 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+sd->shared is ever only used for sd_llc_shared and the sd->shared of
+lower domains are never referenced by the scheduler. Subsequent
+optimization will bloat the size of sd->shared and allocation of
+redundant "sd->shared" can be expensive.
+
+sd_llc is always a !SD_OVERLAP domain and it's children are always a
+subset of the domain, thus the degeneration of a SD_SHARE_LLC  domain
+implies that it either contains a single CPU, or its span matches with
+that of a its child domain.
+
+Initialize a single level of per-CPU sched_domain_shared objects instead
+of doing it for each topology level. Assign sd->shared to the highest
+SD_SHARE_LLC domain and rely on the degeneration path to pass it to the
+correct topology level.
+
+Reviewed-by: Gautham R. Shenoy <gautham.shenoy@amd.com>
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+Valentin, Peter,
+
+Was this ever attempted in the past? Is there some interesting topology
+out there that I'm missing where this wouldn't work?
+---
+ include/linux/sched/topology.h |   1 -
+ kernel/sched/topology.c        | 101 +++++++++++++++++++++++----------
+ 2 files changed, 71 insertions(+), 31 deletions(-)
+
+diff --git a/include/linux/sched/topology.h b/include/linux/sched/topology.h
+index bbcfdf12aa6e..d816911de435 100644
+--- a/include/linux/sched/topology.h
++++ b/include/linux/sched/topology.h
+@@ -168,7 +168,6 @@ typedef int (*sched_domain_flags_f)(void);
+ 
+ struct sd_data {
+ 	struct sched_domain *__percpu *sd;
+-	struct sched_domain_shared *__percpu *sds;
+ 	struct sched_group *__percpu *sg;
+ 	struct sched_group_capacity *__percpu *sgc;
+ };
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index 1104d931c015..f3ebb9e8fe00 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -679,6 +679,9 @@ static void update_top_cache_domain(int cpu)
+ 	if (sd) {
+ 		id = cpumask_first(sched_domain_span(sd));
+ 		size = cpumask_weight(sched_domain_span(sd));
++
++		/* If sd_llc exists, sd_llc_shared should exist too. */
++		WARN_ON_ONCE(!sd->shared);
+ 		sds = sd->shared;
+ 	}
+ 
+@@ -727,6 +730,13 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
+ 		if (sd_parent_degenerate(tmp, parent)) {
+ 			tmp->parent = parent->parent;
+ 
++			/* Pick reference to parent->shared. */
++			if (parent->shared) {
++				WARN_ON_ONCE(tmp->shared);
++				tmp->shared = parent->shared;
++				parent->shared = NULL;
++			}
++
+ 			if (parent->parent) {
+ 				parent->parent->child = tmp;
+ 				parent->parent->groups->flags = tmp->flags;
+@@ -776,6 +786,7 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
+ }
+ 
+ struct s_data {
++	struct sched_domain_shared * __percpu *sds;
+ 	struct sched_domain * __percpu *sd;
+ 	struct root_domain	*rd;
+ };
+@@ -783,6 +794,7 @@ struct s_data {
+ enum s_alloc {
+ 	sa_rootdomain,
+ 	sa_sd,
++	sa_sd_shared,
+ 	sa_sd_storage,
+ 	sa_none,
+ };
+@@ -1529,6 +1541,9 @@ static void set_domain_attribute(struct sched_domain *sd,
+ static void __sdt_free(const struct cpumask *cpu_map);
+ static int __sdt_alloc(const struct cpumask *cpu_map);
+ 
++static void __sds_free(struct s_data *d, const struct cpumask *cpu_map);
++static int __sds_alloc(struct s_data *d, const struct cpumask *cpu_map);
++
+ static void __free_domain_allocs(struct s_data *d, enum s_alloc what,
+ 				 const struct cpumask *cpu_map)
+ {
+@@ -1540,6 +1555,9 @@ static void __free_domain_allocs(struct s_data *d, enum s_alloc what,
+ 	case sa_sd:
+ 		free_percpu(d->sd);
+ 		fallthrough;
++	case sa_sd_shared:
++		__sds_free(d, cpu_map);
++		fallthrough;
+ 	case sa_sd_storage:
+ 		__sdt_free(cpu_map);
+ 		fallthrough;
+@@ -1555,9 +1573,11 @@ __visit_domain_allocation_hell(struct s_data *d, const struct cpumask *cpu_map)
+ 
+ 	if (__sdt_alloc(cpu_map))
+ 		return sa_sd_storage;
++	if (__sds_alloc(d, cpu_map))
++		return sa_sd_shared;
+ 	d->sd = alloc_percpu(struct sched_domain *);
+ 	if (!d->sd)
+-		return sa_sd_storage;
++		return sa_sd_shared;
+ 	d->rd = alloc_rootdomain();
+ 	if (!d->rd)
+ 		return sa_sd;
+@@ -1577,9 +1597,6 @@ static void claim_allocations(int cpu, struct sched_domain *sd)
+ 	WARN_ON_ONCE(*per_cpu_ptr(sdd->sd, cpu) != sd);
+ 	*per_cpu_ptr(sdd->sd, cpu) = NULL;
+ 
+-	if (atomic_read(&(*per_cpu_ptr(sdd->sds, cpu))->ref))
+-		*per_cpu_ptr(sdd->sds, cpu) = NULL;
+-
+ 	if (atomic_read(&(*per_cpu_ptr(sdd->sg, cpu))->ref))
+ 		*per_cpu_ptr(sdd->sg, cpu) = NULL;
+ 
+@@ -1709,16 +1726,6 @@ sd_init(struct sched_domain_topology_level *tl,
+ 		sd->cache_nice_tries = 1;
+ 	}
+ 
+-	/*
+-	 * For all levels sharing cache; connect a sched_domain_shared
+-	 * instance.
+-	 */
+-	if (sd->flags & SD_SHARE_LLC) {
+-		sd->shared = *per_cpu_ptr(sdd->sds, sd_id);
+-		atomic_inc(&sd->shared->ref);
+-		atomic_set(&sd->shared->nr_busy_cpus, sd_weight);
+-	}
+-
+ 	sd->private = sdd;
+ 
+ 	return sd;
+@@ -2295,10 +2302,6 @@ static int __sdt_alloc(const struct cpumask *cpu_map)
+ 		if (!sdd->sd)
+ 			return -ENOMEM;
+ 
+-		sdd->sds = alloc_percpu(struct sched_domain_shared *);
+-		if (!sdd->sds)
+-			return -ENOMEM;
+-
+ 		sdd->sg = alloc_percpu(struct sched_group *);
+ 		if (!sdd->sg)
+ 			return -ENOMEM;
+@@ -2309,7 +2312,6 @@ static int __sdt_alloc(const struct cpumask *cpu_map)
+ 
+ 		for_each_cpu(j, cpu_map) {
+ 			struct sched_domain *sd;
+-			struct sched_domain_shared *sds;
+ 			struct sched_group *sg;
+ 			struct sched_group_capacity *sgc;
+ 
+@@ -2320,13 +2322,6 @@ static int __sdt_alloc(const struct cpumask *cpu_map)
+ 
+ 			*per_cpu_ptr(sdd->sd, j) = sd;
+ 
+-			sds = kzalloc_node(sizeof(struct sched_domain_shared),
+-					GFP_KERNEL, cpu_to_node(j));
+-			if (!sds)
+-				return -ENOMEM;
+-
+-			*per_cpu_ptr(sdd->sds, j) = sds;
+-
+ 			sg = kzalloc_node(sizeof(struct sched_group) + cpumask_size(),
+ 					GFP_KERNEL, cpu_to_node(j));
+ 			if (!sg)
+@@ -2368,8 +2363,6 @@ static void __sdt_free(const struct cpumask *cpu_map)
+ 				kfree(*per_cpu_ptr(sdd->sd, j));
+ 			}
+ 
+-			if (sdd->sds)
+-				kfree(*per_cpu_ptr(sdd->sds, j));
+ 			if (sdd->sg)
+ 				kfree(*per_cpu_ptr(sdd->sg, j));
+ 			if (sdd->sgc)
+@@ -2377,8 +2370,6 @@ static void __sdt_free(const struct cpumask *cpu_map)
+ 		}
+ 		free_percpu(sdd->sd);
+ 		sdd->sd = NULL;
+-		free_percpu(sdd->sds);
+-		sdd->sds = NULL;
+ 		free_percpu(sdd->sg);
+ 		sdd->sg = NULL;
+ 		free_percpu(sdd->sgc);
+@@ -2386,6 +2377,42 @@ static void __sdt_free(const struct cpumask *cpu_map)
+ 	}
+ }
+ 
++static int __sds_alloc(struct s_data *d, const struct cpumask *cpu_map)
++{
++	int j;
++
++	d->sds = alloc_percpu(struct sched_domain_shared *);
++	if (!d->sds)
++		return -ENOMEM;
++
++	for_each_cpu(j, cpu_map) {
++		struct sched_domain_shared *sds;
++
++		sds = kzalloc_node(sizeof(struct sched_domain_shared),
++				GFP_KERNEL, cpu_to_node(j));
++		if (!sds)
++			return -ENOMEM;
++
++		*per_cpu_ptr(d->sds, j) = sds;
++	}
++
++	return 0;
++}
++
++static void __sds_free(struct s_data *d, const struct cpumask *cpu_map)
++{
++	int j;
++
++	if (!d->sds)
++		return;
++
++	for_each_cpu(j, cpu_map)
++		kfree(*per_cpu_ptr(d->sds, j));
++
++	free_percpu(d->sds);
++	d->sds = NULL;
++}
++
+ static struct sched_domain *build_sched_domain(struct sched_domain_topology_level *tl,
+ 		const struct cpumask *cpu_map, struct sched_domain_attr *attr,
+ 		struct sched_domain *child, int cpu)
+@@ -2537,8 +2564,19 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 		unsigned int imb_span = 1;
+ 
+ 		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
++			struct sched_domain *parent = sd->parent;
+ 			struct sched_domain *child = sd->child;
+ 
++			/* Attach sd->shared to the topmost SD_SHARE_LLC domain. */
++			if ((sd->flags & SD_SHARE_LLC) &&
++			    (!parent || !(parent->flags & SD_SHARE_LLC))) {
++				int llc_id = cpumask_first(sched_domain_span(sd));
++
++				sd->shared = *per_cpu_ptr(d.sds, llc_id);
++				atomic_set(&sd->shared->nr_busy_cpus, sd->span_weight);
++				atomic_inc(&sd->shared->ref);
++			}
++
+ 			if (!(sd->flags & SD_SHARE_LLC) && child &&
+ 			    (child->flags & SD_SHARE_LLC)) {
+ 				struct sched_domain __rcu *top_p;
+@@ -2591,6 +2629,9 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 		if (!cpumask_test_cpu(i, cpu_map))
+ 			continue;
+ 
++		if (atomic_read(&(*per_cpu_ptr(d.sds, i))->ref))
++			*per_cpu_ptr(d.sds, i) = NULL;
++
+ 		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
+ 			claim_allocations(i, sd);
+ 			init_sched_groups_capacity(i, sd);
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 03/19] sched/fair: Use rq->nohz_tick_stopped in update_nohz_stats()
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+  2025-09-04  4:14 ` [RFC PATCH 01/19] sched/fair: Simplify set_cpu_sd_state_*() with guards K Prateek Nayak
+  2025-09-04  4:14 ` [RFC PATCH 02/19] sched/topology: Optimize sd->shared allocation and assignment K Prateek Nayak
+@ 2025-09-04  4:14 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 04/19] sched/fair: Use xchg() to set sd->nohz_idle state K Prateek Nayak
+                   ` (15 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:14 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+"rq->nohz_tick_stopped" always follows the state of CPU on
+"nohz.idle_cpus_mask". Use the local rq indicator instead of checking
+for the CPU on the "idle_cpus_mask".
+
+Use READ_ONCE() and WRITE_ONCE() for "rq->nohz_tick_stopped" to ensure
+update_nohz_stats() always sees the latest value.
+
+This cleanup is necessary to avoid the number of references to the
+global "nohz.idle_cpus_mask" to ease the transition to a distributed
+nohz idle tracking strategy.
+
+No functional changes intended.
+
+Reviewed-by: Gautham R. Shenoy <gautham.shenoy@amd.com>
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 61b59fd75ced..af9f2c1e93f8 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12463,10 +12463,10 @@ void nohz_balance_exit_idle(struct rq *rq)
+ {
+ 	WARN_ON_ONCE(rq != this_rq());
+ 
+-	if (likely(!rq->nohz_tick_stopped))
++	if (likely(!READ_ONCE(rq->nohz_tick_stopped)))
+ 		return;
+ 
+-	rq->nohz_tick_stopped = 0;
++	WRITE_ONCE(rq->nohz_tick_stopped, 0);
+ 	cpumask_clear_cpu(rq->cpu, nohz.idle_cpus_mask);
+ 	atomic_dec(&nohz.nr_cpus);
+ 
+@@ -12514,14 +12514,14 @@ void nohz_balance_enter_idle(int cpu)
+ 	 * *_avg. The CPU is already part of nohz.idle_cpus_mask so the clear
+ 	 * of nohz.has_blocked can only happen after checking the new load
+ 	 */
+-	if (rq->nohz_tick_stopped)
++	if (READ_ONCE(rq->nohz_tick_stopped))
+ 		goto out;
+ 
+ 	/* If we're a completely isolated CPU, we don't play: */
+ 	if (on_null_domain(rq))
+ 		return;
+ 
+-	rq->nohz_tick_stopped = 1;
++	WRITE_ONCE(rq->nohz_tick_stopped, 1);
+ 
+ 	cpumask_set_cpu(cpu, nohz.idle_cpus_mask);
+ 	atomic_inc(&nohz.nr_cpus);
+@@ -12551,7 +12551,7 @@ static bool update_nohz_stats(struct rq *rq)
+ 	if (!rq->has_blocked_load)
+ 		return false;
+ 
+-	if (!cpumask_test_cpu(cpu, nohz.idle_cpus_mask))
++	if (!READ_ONCE(rq->nohz_tick_stopped))
+ 		return false;
+ 
+ 	if (!time_after(jiffies, READ_ONCE(rq->last_blocked_load_update_tick)))
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 04/19] sched/fair: Use xchg() to set sd->nohz_idle state
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (2 preceding siblings ...)
+  2025-09-04  4:14 ` [RFC PATCH 03/19] sched/fair: Use rq->nohz_tick_stopped in update_nohz_stats() K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 05/19] sched/topology: Attach new hierarchy in rq_attach_root() K Prateek Nayak
+                   ` (14 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+"sd->nohz_idle" currently relies on the fact that it is always modified
+from the local CPU to keep consistency however, the subsequent commits
+will use the rq->online() callback to correct the "sd->nohz_idle" status
+from a remote CPU during sched domain rebuild.
+
+Use xchg() instead to prevent double accounting of "nr_busy_cpus" if the
+status update on the local CPU races with a correction from a remote
+CPU.
+
+No functional changes intended.
+
+Reviewed-by: Gautham R. Shenoy <gautham.shenoy@amd.com>
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index af9f2c1e93f8..0e68371365a5 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12455,7 +12455,9 @@ static void set_cpu_sd_state_busy(int cpu)
+ 	if (!sd || !sd->nohz_idle)
+ 		return;
+ 
+-	sd->nohz_idle = 0;
++	if (!xchg(&sd->nohz_idle, 0))
++		return;
++
+ 	atomic_inc(&sd->shared->nr_busy_cpus);
+ }
+ 
+@@ -12483,7 +12485,9 @@ static void set_cpu_sd_state_idle(int cpu)
+ 	if (!sd || sd->nohz_idle)
+ 		return;
+ 
+-	sd->nohz_idle = 1;
++	if (xchg(&sd->nohz_idle, 1))
++		return;
++
+ 	atomic_dec(&sd->shared->nr_busy_cpus);
+ }
+ 
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 05/19] sched/topology: Attach new hierarchy in rq_attach_root()
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (3 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 04/19] sched/fair: Use xchg() to set sd->nohz_idle state K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 06/19] sched/fair: Fixup sd->nohz_idle state during hotplug / cpuset K Prateek Nayak
+                   ` (13 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Gregory Haskins introduced the concept of root domain in commit
+57d885fea0da ("sched: add sched-domain roots") which put
+rq_attach_root() before rcu_assign_pointer(rq->sd, sd).
+
+Further development around dynamic sched domain allocation, and
+update_top_cache_domain() that came later relied on the new sched
+domain hierarchy and was naturaturally done after rq->sd was updated.
+
+Since subsequent changes around nohz idle CPU tracking creates a
+dependency for the fair_sched_class->offline() callback to use the old
+hierarchy and the fair_sched_class->online() callback to use the
+updated hierarchy, update rq->sd and the top cache domains within
+rq_attach_root() between the two callbacks.
+
+This modifies the flow as follows:
+
+       old flow                              new flow
+       ========                              ========
+
+  rq_attach_root()                   rq_attach_root()
+    set_rq_offline();                  set_rq_offline(); /* Operate on old sd_llc */
+    set_rq_online();                   rq->sd = sd;
+  rq->sd = sd;                         update_top_cache_domain()
+  update_top_cache_domain()            set_rq_online(); /* Operate on new sd_llc */
+
+No functional changes intended.
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/core.c     |  2 +-
+ kernel/sched/sched.h    |  2 +-
+ kernel/sched/topology.c | 38 ++++++++++++++++++++++++--------------
+ 3 files changed, 26 insertions(+), 16 deletions(-)
+
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index feb750aae71b..771fc6239386 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -8798,7 +8798,7 @@ void __init sched_init(void)
+ 
+ 		INIT_LIST_HEAD(&rq->cfs_tasks);
+ 
+-		rq_attach_root(rq, &def_root_domain);
++		rq_attach_root(rq, &def_root_domain, NULL);
+ #ifdef CONFIG_NO_HZ_COMMON
+ 		rq->last_blocked_load_update_tick = jiffies;
+ 		atomic_set(&rq->nohz_flags, 0);
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index b5367c514c14..9ae3e2993641 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -1020,7 +1020,7 @@ struct root_domain {
+ 
+ extern void init_defrootdomain(void);
+ extern int sched_init_domains(const struct cpumask *cpu_map);
+-extern void rq_attach_root(struct rq *rq, struct root_domain *rd);
++extern void rq_attach_root(struct rq *rq, struct root_domain *rd, struct sched_domain *sd);
+ extern void sched_get_rd(struct root_domain *rd);
+ extern void sched_put_rd(struct root_domain *rd);
+ 
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index f3ebb9e8fe00..a059641e12e5 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -469,9 +469,12 @@ static void free_rootdomain(struct rcu_head *rcu)
+ 	kfree(rd);
+ }
+ 
+-void rq_attach_root(struct rq *rq, struct root_domain *rd)
++static void update_top_cache_domain(int cpu);
++
++void rq_attach_root(struct rq *rq, struct root_domain *rd, struct sched_domain *sd)
+ {
+ 	struct root_domain *old_rd = NULL;
++	int cpu = cpu_of(rq);
+ 	struct rq_flags rf;
+ 
+ 	rq_lock_irqsave(rq, &rf);
+@@ -494,6 +497,8 @@ void rq_attach_root(struct rq *rq, struct root_domain *rd)
+ 	}
+ 
+ 	atomic_inc(&rd->refcount);
++	rcu_assign_pointer(rq->sd, sd);
++	update_top_cache_domain(cpu);
+ 	rq->rd = rd;
+ 
+ 	cpumask_set_cpu(rq->cpu, rd->span);
+@@ -711,16 +716,27 @@ static void update_top_cache_domain(int cpu)
+ 	rcu_assign_pointer(per_cpu(sd_asym_cpucapacity, cpu), sd);
+ }
+ 
++struct s_data {
++	struct sched_domain_shared * __percpu *sds;
++	struct sched_domain * __percpu *sd;
++	struct root_domain	*rd;
++};
++
+ /*
+  * Attach the domain 'sd' to 'cpu' as its base domain. Callers must
+  * hold the hotplug lock.
+  */
+ static void
+-cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
++cpu_attach_domain(struct s_data *d, int cpu)
+ {
++	struct root_domain *rd = d->rd;
++	struct sched_domain *sd = NULL;
+ 	struct rq *rq = cpu_rq(cpu);
+ 	struct sched_domain *tmp;
+ 
++	if (d->sd)
++		sd = *per_cpu_ptr(d->sd, cpu);
++
+ 	/* Remove the sched domains which do not contribute to scheduling. */
+ 	for (tmp = sd; tmp; ) {
+ 		struct sched_domain *parent = tmp->parent;
+@@ -776,21 +792,13 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
+ 
+ 	sched_domain_debug(sd, cpu);
+ 
+-	rq_attach_root(rq, rd);
+ 	tmp = rq->sd;
+-	rcu_assign_pointer(rq->sd, sd);
++	rq_attach_root(rq, rd, sd);
+ 	dirty_sched_domain_sysctl(cpu);
+ 	destroy_sched_domains(tmp);
+ 
+-	update_top_cache_domain(cpu);
+ }
+ 
+-struct s_data {
+-	struct sched_domain_shared * __percpu *sds;
+-	struct sched_domain * __percpu *sd;
+-	struct root_domain	*rd;
+-};
+-
+ enum s_alloc {
+ 	sa_rootdomain,
+ 	sa_sd,
+@@ -2642,9 +2650,8 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 	rcu_read_lock();
+ 	for_each_cpu(i, cpu_map) {
+ 		rq = cpu_rq(i);
+-		sd = *per_cpu_ptr(d.sd, i);
+ 
+-		cpu_attach_domain(sd, d.rd, i);
++		cpu_attach_domain(&d, i);
+ 
+ 		if (lowest_flag_domain(i, SD_CLUSTER))
+ 			has_cluster = true;
+@@ -2749,6 +2756,9 @@ int __init sched_init_domains(const struct cpumask *cpu_map)
+ static void detach_destroy_domains(const struct cpumask *cpu_map)
+ {
+ 	unsigned int cpu = cpumask_any(cpu_map);
++	struct s_data d = {
++		.rd = &def_root_domain,
++	};
+ 	int i;
+ 
+ 	if (rcu_access_pointer(per_cpu(sd_asym_cpucapacity, cpu)))
+@@ -2759,7 +2769,7 @@ static void detach_destroy_domains(const struct cpumask *cpu_map)
+ 
+ 	rcu_read_lock();
+ 	for_each_cpu(i, cpu_map)
+-		cpu_attach_domain(NULL, &def_root_domain, i);
++		cpu_attach_domain(&d, i);
+ 	rcu_read_unlock();
+ }
+ 
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 06/19] sched/fair: Fixup sd->nohz_idle state during hotplug / cpuset
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (4 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 05/19] sched/topology: Attach new hierarchy in rq_attach_root() K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 07/19] sched/fair: Account idle cpus instead of busy cpus in sd->shared K Prateek Nayak
+                   ` (12 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+When CPUs are transitioned offline, set_cpu_sd_state_busy() is called
+to exclude the CPU from nohz idle balancing. Currently, it is done
+independently via sched_cpu_deactivate() but subsequent transition of
+the nohz idle tracking into the sched domain hierarchy would require
+each CPU's status to be updated in the new hierarchy generated during
+hotplug / cpuset.
+
+Call set_cpu_sd_state_{idle,busy}() from the fair_sched_class' offline()
+and online() callback respectively to ensure "sd->nohz_idle" of the
+updated hierarchy reflects the same state as "rq->nohz_tick_stopped".
+
+The changes from the prior commit to always update the rq->sd and the
+top cache domains from rq_attach_root() ensures that the offline()
+callback works on the older hierarchy and the online() callback works on
+the updated hierarchy.
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 0e68371365a5..61e1b4deb3e8 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12491,6 +12491,18 @@ static void set_cpu_sd_state_idle(int cpu)
+ 	atomic_dec(&sd->shared->nr_busy_cpus);
+ }
+ 
++static void cpu_sd_exit_nohz_balance(struct rq *rq)
++{
++	if (READ_ONCE(rq->nohz_tick_stopped))
++		set_cpu_sd_state_busy(cpu_of(rq));
++}
++
++static void cpu_sd_reenter_nohz_balance(struct rq *rq)
++{
++	if (READ_ONCE(rq->nohz_tick_stopped))
++		set_cpu_sd_state_idle(cpu_of(rq));
++}
++
+ /*
+  * This routine will record that the CPU is going idle with tick stopped.
+  * This info will be used in performing idle load balancing in the future.
+@@ -12741,6 +12753,8 @@ static void nohz_newidle_balance(struct rq *this_rq)
+ }
+ 
+ #else /* !CONFIG_NO_HZ_COMMON: */
++static inline void cpu_sd_exit_nohz_balance(struct rq *rq) { }
++static inline void cpu_sd_reenter_nohz_balance(struct rq *rq) { }
+ static inline void nohz_balancer_kick(struct rq *rq) { }
+ 
+ static inline bool nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
+@@ -12940,6 +12954,9 @@ static void rq_online_fair(struct rq *rq)
+ 	update_sysctl();
+ 
+ 	update_runtime_enabled(rq);
++
++	/* Fixup nr_busy_cpus and nohz stats. */
++	cpu_sd_reenter_nohz_balance(rq);
+ }
+ 
+ static void rq_offline_fair(struct rq *rq)
+@@ -12951,6 +12968,9 @@ static void rq_offline_fair(struct rq *rq)
+ 
+ 	/* Ensure that we remove rq contribution to group share: */
+ 	clear_tg_offline_cfs_rqs(rq);
++
++	/* Fixup nr_busy_cpus and nohz stats. */
++	cpu_sd_exit_nohz_balance(rq);
+ }
+ 
+ #ifdef CONFIG_SCHED_CORE
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 07/19] sched/fair: Account idle cpus instead of busy cpus in sd->shared
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (5 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 06/19] sched/fair: Fixup sd->nohz_idle state during hotplug / cpuset K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 08/19] sched/topology: Introduce fallback sd->shared assignment K Prateek Nayak
+                   ` (11 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Switch to keeping track of "sd->shared->nr_idle_cpus" instead of
+"nr_busy_cpus". Since previous commit corrected the "sd->nohz_idle"
+state during sched domain rebuild, the nr_idle_cpus will reflect the
+correct number of idle CPUs.
+
+The idle CPUs accounting will be used for nohz idle balance in the
+subsequent commits.
+
+Races are possible during hotplug / cpuset where "nr_idle_cpus" might
+be incorrectly accounted if the CPU enters exits out of nohz idle state
+between the read of "rq->nohz_tick_stopped" and the subsequent update of
+"sd->nohz_idle" in the hotplug path but these inaccuracies are transient
+and will be corrected when the CPU enters idle or receives a tick.
+
+  CPU0 (hotplug)                                    CPU1 (exits nohz idle)
+  ==============                                    ======================
+  online()
+    if (rq->nohz_tick_stopped) /* True */
+      ...                                          rq->nohz_tick_stopped = 0
+      ...                                          set_cpu_sd_state_busy()
+      ...
+      set_cpu_sd_state_idle()
+
+These situations are rare and should not have any long-term effect on
+the nohz idle balancing since there isn't a case where a nohz idle CPU
+is not set on the mask - either the hotplug thread sees that
+"rq->nohz_tick_stopped" is set or the CPU going idle sees the updated
+sched_domain hierarchy.
+
+After the conversion, all the bits that use "nr_idle_cpus" are already
+guarded behind CONFIG_NO_HZ_COMMON which makes it convenient to put the
+declaration behind CONFIG_NO_HZ_COMMON as well.
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ include/linux/sched/topology.h |  4 +++-
+ kernel/sched/fair.c            | 10 +++++-----
+ kernel/sched/topology.c        |  1 -
+ 3 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/include/linux/sched/topology.h b/include/linux/sched/topology.h
+index d816911de435..2f0d8ecea427 100644
+--- a/include/linux/sched/topology.h
++++ b/include/linux/sched/topology.h
+@@ -65,7 +65,9 @@ struct sched_group;
+ 
+ struct sched_domain_shared {
+ 	atomic_t	ref;
+-	atomic_t	nr_busy_cpus;
++#ifdef CONFIG_NO_HZ_COMMON
++	atomic_t	nr_idle_cpus;
++#endif
+ 	int		has_idle_cores;
+ 	int		nr_idle_scan;
+ };
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 61e1b4deb3e8..dee0ded7f40d 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12429,7 +12429,7 @@ static void nohz_balancer_kick(struct rq *rq)
+ 		 * the others are - so just get a NOHZ balance going if it looks
+ 		 * like this LLC domain has tasks we could move.
+ 		 */
+-		nr_busy = atomic_read(&sds->nr_busy_cpus);
++		nr_busy = per_cpu(sd_llc_size, cpu) - atomic_read(&sds->nr_idle_cpus);
+ 		if (nr_busy > 1) {
+ 			flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
+ 			goto unlock;
+@@ -12458,7 +12458,7 @@ static void set_cpu_sd_state_busy(int cpu)
+ 	if (!xchg(&sd->nohz_idle, 0))
+ 		return;
+ 
+-	atomic_inc(&sd->shared->nr_busy_cpus);
++	atomic_dec(&sd->shared->nr_idle_cpus);
+ }
+ 
+ void nohz_balance_exit_idle(struct rq *rq)
+@@ -12488,7 +12488,7 @@ static void set_cpu_sd_state_idle(int cpu)
+ 	if (xchg(&sd->nohz_idle, 1))
+ 		return;
+ 
+-	atomic_dec(&sd->shared->nr_busy_cpus);
++	atomic_inc(&sd->shared->nr_idle_cpus);
+ }
+ 
+ static void cpu_sd_exit_nohz_balance(struct rq *rq)
+@@ -12955,7 +12955,7 @@ static void rq_online_fair(struct rq *rq)
+ 
+ 	update_runtime_enabled(rq);
+ 
+-	/* Fixup nr_busy_cpus and nohz stats. */
++	/* Fixup nr_idle_cpus and nohz stats. */
+ 	cpu_sd_reenter_nohz_balance(rq);
+ }
+ 
+@@ -12969,7 +12969,7 @@ static void rq_offline_fair(struct rq *rq)
+ 	/* Ensure that we remove rq contribution to group share: */
+ 	clear_tg_offline_cfs_rqs(rq);
+ 
+-	/* Fixup nr_busy_cpus and nohz stats. */
++	/* Fixup nr_idle_cpus and nohz stats. */
+ 	cpu_sd_exit_nohz_balance(rq);
+ }
+ 
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index a059641e12e5..0b0257937a97 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -2581,7 +2581,6 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 				int llc_id = cpumask_first(sched_domain_span(sd));
+ 
+ 				sd->shared = *per_cpu_ptr(d.sds, llc_id);
+-				atomic_set(&sd->shared->nr_busy_cpus, sd->span_weight);
+ 				atomic_inc(&sd->shared->ref);
+ 			}
+ 
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 08/19] sched/topology: Introduce fallback sd->shared assignment
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (6 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 07/19] sched/fair: Account idle cpus instead of busy cpus in sd->shared K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 09/19] sched/topology: Introduce percpu sd_nohz for nohz state tracking K Prateek Nayak
+                   ` (10 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Going forward, tying the nohz balancing to "sd->shared" will require
+each CPU's hierarchy to have at least one "sd->shared" object tracking
+its idle status.
+
+If the lowest domain of the hierarchy after degeneration does not have
+the SD_SHARE_LLC flag set, assign a per-Node fallback shared object to
+the lowest domain on CONFIG_NO_HZ_COMMON. !CONFIG_NO_HZ_COMMON kernels
+will always have tick enabled on idle CPUs and will not require nohz
+idle tracking.
+
+An example scenario where the fallback shared object is used is as
+follows - Consider a cpuset with 17CPUs where 16CPUs are from the same
+LLC and a singleton CPU from another LLC:
+
+  CPU0:
+  domain0: MC {0-15}
+    groups: {0} {1} ... {15}
+    domain1: PKG {0-16}
+      groups: {0-15} {16}
+  ...
+  CPU15:
+  domain0: MC {0-15}
+    groups: {15} {0} {1} ... {14}
+    domain1: PKG {0-16}
+      groups: {0-15} {16}
+  CPU16:
+  # MC is degenerated since {16} is the only CPU is the domain
+  domain0: PKG {0-15}
+    groups: {16} {0-15}
+  # Assign sd[PKG]->shared = fallback_dhared[cpu_to_node(16)]
+
+If the lowest domain is a SD_OVERLAP domain, "sd->shared" is only shared
+by the CPUs on the same node and not the entire domain. This is
+acceptable since the fallback shared object is only keeping track of the
+CPU's idle status unlike sd_llc_shared which also tracks
+"has_idle_cores" and "nr_idle_scan".
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/topology.c | 123 ++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 117 insertions(+), 6 deletions(-)
+
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index 0b0257937a97..d71c60d99313 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -455,6 +455,96 @@ static bool build_perf_domains(const struct cpumask *cpu_map)
+ static void free_pd(struct perf_domain *pd) { }
+ #endif /* !(CONFIG_ENERGY_MODEL && CONFIG_CPU_FREQ_GOV_SCHEDUTIL) */
+ 
++struct s_data {
++#ifdef CONFIG_NO_HZ_COMMON
++	struct sched_domain_shared **fallback_nohz_sds;
++#endif
++	struct sched_domain_shared * __percpu *sds;
++	struct sched_domain * __percpu *sd;
++	struct root_domain	*rd;
++};
++
++#ifdef CONFIG_NO_HZ_COMMON
++
++static int __fallback_sds_alloc(struct s_data *d, unsigned long *visited_nodes)
++{
++	int j;
++
++	d->fallback_nohz_sds = kcalloc(nr_node_ids,
++			sizeof(*d->fallback_nohz_sds), GFP_KERNEL);
++	if (!d->fallback_nohz_sds)
++		return -ENOMEM;
++
++	/*
++	 * Allocate a fallback sd->shared object
++	 * for each node covered by the cpu_map.
++	 */
++	for_each_set_bit(j, visited_nodes, nr_node_ids) {
++		struct sched_domain_shared *sds;
++
++		sds = kzalloc_node(sizeof(struct sched_domain_shared),
++				GFP_KERNEL, j);
++		if (!sds)
++			return -ENOMEM;
++
++		d->fallback_nohz_sds[j] = sds;
++	}
++
++	return 0;
++}
++
++static void __fallback_sds_free(struct s_data *d)
++{
++	int j;
++
++	if (!d->fallback_nohz_sds)
++		return;
++
++	for (j = 0; j < nr_node_ids; ++j)
++		kfree(d->fallback_nohz_sds[j]);
++
++	kfree(d->fallback_nohz_sds);
++	d->fallback_nohz_sds = NULL;
++}
++
++static void assign_fallback_sds(struct s_data *d, struct sched_domain *sd, int cpu)
++{
++	struct sched_domain_shared *sds;
++
++	sds = d->fallback_nohz_sds[cpu_to_node(cpu)];
++	sd->shared = sds;
++	atomic_inc(&sd->shared->ref);
++}
++
++static void claim_fallback_sds(struct s_data *d)
++{
++	int j;
++
++	/*
++	 * Claim allocations for the fallback shared objects
++	 * if they were assigned during cpu_attach_domain().
++	 */
++	for (j = 0; j < nr_node_ids; ++j) {
++		struct sched_domain_shared *sds = d->fallback_nohz_sds[j];
++
++		if (sds && atomic_read(&sds->ref))
++			d->fallback_nohz_sds[j] = NULL;
++	}
++}
++
++#else /* !CONFIG_NO_HZ_COMMON */
++
++static inline int __fallback_sds_alloc(struct s_data *d, unsigned long *visited_nodes)
++{
++	return 0;
++}
++
++static inline void __fallback_sds_free(struct s_data *d) { }
++static inline void assign_fallback_sds(struct s_data *d, struct sched_domain *sd, int cpu) { }
++static inline void claim_fallback_sds(struct s_data *d) { }
++
++#endif /* CONFIG_NO_HZ_COMMON */
++
+ static void free_rootdomain(struct rcu_head *rcu)
+ {
+ 	struct root_domain *rd = container_of(rcu, struct root_domain, rcu);
+@@ -716,12 +806,6 @@ static void update_top_cache_domain(int cpu)
+ 	rcu_assign_pointer(per_cpu(sd_asym_cpucapacity, cpu), sd);
+ }
+ 
+-struct s_data {
+-	struct sched_domain_shared * __percpu *sds;
+-	struct sched_domain * __percpu *sd;
+-	struct root_domain	*rd;
+-};
+-
+ /*
+  * Attach the domain 'sd' to 'cpu' as its base domain. Callers must
+  * hold the hotplug lock.
+@@ -790,6 +874,14 @@ cpu_attach_domain(struct s_data *d, int cpu)
+ 		}
+ 	}
+ 
++	/*
++	 * Ensure there is at least one domain in the
++	 * hierarchy with sd->shared attached to
++	 * ensure participation in nohz balancing.
++	 */
++	if (sd && !(sd->flags & SD_SHARE_LLC))
++		assign_fallback_sds(d, sd, cpu);
++
+ 	sched_domain_debug(sd, cpu);
+ 
+ 	tmp = rq->sd;
+@@ -2387,12 +2479,19 @@ static void __sdt_free(const struct cpumask *cpu_map)
+ 
+ static int __sds_alloc(struct s_data *d, const struct cpumask *cpu_map)
+ {
++	unsigned long *visited_nodes;
+ 	int j;
+ 
++	visited_nodes = bitmap_alloc(nr_node_ids, GFP_KERNEL);
++	if (!visited_nodes)
++		return -ENOMEM;
++
+ 	d->sds = alloc_percpu(struct sched_domain_shared *);
+ 	if (!d->sds)
+ 		return -ENOMEM;
+ 
++	bitmap_zero(visited_nodes, nr_node_ids);
++
+ 	for_each_cpu(j, cpu_map) {
+ 		struct sched_domain_shared *sds;
+ 
+@@ -2401,9 +2500,13 @@ static int __sds_alloc(struct s_data *d, const struct cpumask *cpu_map)
+ 		if (!sds)
+ 			return -ENOMEM;
+ 
++		bitmap_set(visited_nodes, cpu_to_node(j), 1);
+ 		*per_cpu_ptr(d->sds, j) = sds;
+ 	}
+ 
++	if (__fallback_sds_alloc(d, visited_nodes))
++		return -ENOMEM;
++
+ 	return 0;
+ }
+ 
+@@ -2417,6 +2520,8 @@ static void __sds_free(struct s_data *d, const struct cpumask *cpu_map)
+ 	for_each_cpu(j, cpu_map)
+ 		kfree(*per_cpu_ptr(d->sds, j));
+ 
++	__fallback_sds_free(d);
++
+ 	free_percpu(d->sds);
+ 	d->sds = NULL;
+ }
+@@ -2655,6 +2760,12 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
+ 		if (lowest_flag_domain(i, SD_CLUSTER))
+ 			has_cluster = true;
+ 	}
++
++	/*
++	 * Claim allocations for the fallback shared objects
++	 * if they were assigned during cpu_attach_domain().
++	 */
++	claim_fallback_sds(&d);
+ 	rcu_read_unlock();
+ 
+ 	if (has_asym)
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 09/19] sched/topology: Introduce percpu sd_nohz for nohz state tracking
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (7 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 08/19] sched/topology: Introduce fallback sd->shared assignment K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 10/19] sched/topology: Introduce "idle_cpus_mask" in sd->shared K Prateek Nayak
+                   ` (9 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Add a per-CPU "sd_nohz" variable to track domains in the local CPU's
+hierarchy that have "sd->shared" set for nohz idle tracking.
+
+Convert cpu_set_sd_state_*() to use "sd_nohz" instead of "sd_llc"
+increasing the scope of tracking to all CPUs with non-NULL sd hierarchy
+attached as opposed to just those CPUs with a "sd_llc" domain.
+
+"sd_nohz" will be used in a subsequent commit to transition
+nohz_balancer_kick() to use the distributed nohz idle tracking.
+
+Reviewed-by: Gautham R. Shenoy <gautham.shenoy@amd.com>
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c     |  4 ++--
+ kernel/sched/sched.h    |  2 ++
+ kernel/sched/topology.c | 22 ++++++++++++++++++++++
+ 3 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index dee0ded7f40d..624b3753c818 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12451,7 +12451,7 @@ static void set_cpu_sd_state_busy(int cpu)
+ 
+ 	guard(rcu)();
+ 
+-	sd = rcu_dereference(per_cpu(sd_llc, cpu));
++	sd = rcu_dereference(per_cpu(sd_nohz, cpu));
+ 	if (!sd || !sd->nohz_idle)
+ 		return;
+ 
+@@ -12481,7 +12481,7 @@ static void set_cpu_sd_state_idle(int cpu)
+ 
+ 	guard(rcu)();
+ 
+-	sd = rcu_dereference(per_cpu(sd_llc, cpu));
++	sd = rcu_dereference(per_cpu(sd_nohz, cpu));
+ 	if (!sd || sd->nohz_idle)
+ 		return;
+ 
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 9ae3e2993641..35ffb3926334 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -3097,6 +3097,8 @@ extern void cfs_bandwidth_usage_dec(void);
+ 
+ #define nohz_flags(cpu)		(&cpu_rq(cpu)->nohz_flags)
+ 
++DECLARE_PER_CPU(struct sched_domain __rcu *, sd_nohz);
++
+ extern void nohz_balance_exit_idle(struct rq *rq);
+ #else /* !CONFIG_NO_HZ_COMMON: */
+ static inline void nohz_balance_exit_idle(struct rq *rq) { }
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index d71c60d99313..f230892528c7 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -466,6 +466,8 @@ struct s_data {
+ 
+ #ifdef CONFIG_NO_HZ_COMMON
+ 
++DEFINE_PER_CPU(struct sched_domain __rcu *, sd_nohz);
++
+ static int __fallback_sds_alloc(struct s_data *d, unsigned long *visited_nodes)
+ {
+ 	int j;
+@@ -532,6 +534,23 @@ static void claim_fallback_sds(struct s_data *d)
+ 	}
+ }
+ 
++static void update_nohz_domain(int cpu)
++{
++	struct sched_domain *sd = highest_flag_domain(cpu, SD_SHARE_LLC);
++
++	/*
++	 * If sd_llc doesn't exist, use the lowest sd for nohz idle
++	 * tracking. cpu_attach_domain() already ensures sd->shared is
++	 * assigned for the lowest domain if sd_llc doesn't exist after
++	 * degeneration of the hierarchy.
++	 */
++	if (!sd)
++		sd = rcu_dereference(cpu_rq(cpu)->sd);
++
++	WARN_ON_ONCE(sd && !sd->shared);
++	rcu_assign_pointer(per_cpu(sd_nohz, cpu), sd);
++}
++
+ #else /* !CONFIG_NO_HZ_COMMON */
+ 
+ static inline int __fallback_sds_alloc(struct s_data *d, unsigned long *visited_nodes)
+@@ -542,6 +561,7 @@ static inline int __fallback_sds_alloc(struct s_data *d, unsigned long *visited_
+ static inline void __fallback_sds_free(struct s_data *d) { }
+ static inline void assign_fallback_sds(struct s_data *d, struct sched_domain *sd, int cpu) { }
+ static inline void claim_fallback_sds(struct s_data *d) { }
++static inline void update_nohz_domain(int cpu) { }
+ 
+ #endif /* CONFIG_NO_HZ_COMMON */
+ 
+@@ -804,6 +824,8 @@ static void update_top_cache_domain(int cpu)
+ 
+ 	sd = lowest_flag_domain(cpu, SD_ASYM_CPUCAPACITY_FULL);
+ 	rcu_assign_pointer(per_cpu(sd_asym_cpucapacity, cpu), sd);
++
++	update_nohz_domain(cpu);
+ }
+ 
+ /*
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 10/19] sched/topology: Introduce "idle_cpus_mask" in sd->shared
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (8 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 09/19] sched/topology: Introduce percpu sd_nohz for nohz state tracking K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 11/19] sched/topology: Introduce "nohz_shared_list" to keep track of sd->shared K Prateek Nayak
+                   ` (8 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Introduce "idle_cpus_mask" to track idle CPUs within the sd_nohz
+domains. This mask will eventually replace the need for the global
+"nohz.idle_cpus" mask for nohz idle balancing.
+
+Convert cpu_set_sd_state_*() to set / clear the CPU from the mask when
+transitioning to / out of nohz idle state.
+
+Reviewed-by: Gautham R. Shenoy <gautham.shenoy@amd.com>
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ include/linux/sched/topology.h |  1 +
+ kernel/sched/fair.c            |  2 ++
+ kernel/sched/topology.c        | 48 +++++++++++++++++++++++++++++++---
+ 3 files changed, 47 insertions(+), 4 deletions(-)
+
+diff --git a/include/linux/sched/topology.h b/include/linux/sched/topology.h
+index 2f0d8ecea427..6db3448e2f00 100644
+--- a/include/linux/sched/topology.h
++++ b/include/linux/sched/topology.h
+@@ -67,6 +67,7 @@ struct sched_domain_shared {
+ 	atomic_t	ref;
+ #ifdef CONFIG_NO_HZ_COMMON
+ 	atomic_t	nr_idle_cpus;
++	struct cpumask	*idle_cpus_mask;
+ #endif
+ 	int		has_idle_cores;
+ 	int		nr_idle_scan;
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 624b3753c818..c8226520758d 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12458,6 +12458,7 @@ static void set_cpu_sd_state_busy(int cpu)
+ 	if (!xchg(&sd->nohz_idle, 0))
+ 		return;
+ 
++	cpumask_clear_cpu(cpu, sd->shared->idle_cpus_mask);
+ 	atomic_dec(&sd->shared->nr_idle_cpus);
+ }
+ 
+@@ -12488,6 +12489,7 @@ static void set_cpu_sd_state_idle(int cpu)
+ 	if (xchg(&sd->nohz_idle, 1))
+ 		return;
+ 
++	cpumask_set_cpu(cpu, sd->shared->idle_cpus_mask);
+ 	atomic_inc(&sd->shared->nr_idle_cpus);
+ }
+ 
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index f230892528c7..c2832445c578 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -468,6 +468,24 @@ struct s_data {
+ 
+ DEFINE_PER_CPU(struct sched_domain __rcu *, sd_nohz);
+ 
++static int __sds_nohz_idle_alloc(struct sched_domain_shared *sds, int node)
++{
++	sds->idle_cpus_mask = kzalloc_node(cpumask_size(), GFP_KERNEL, node);
++
++	if (!sds->idle_cpus_mask)
++		return -ENOMEM;
++
++	return 0;
++}
++
++static void __sds_nohz_idle_free(struct sched_domain_shared *sds)
++{
++	if (!sds)
++		return;
++
++	kfree(sds->idle_cpus_mask);
++}
++
+ static int __fallback_sds_alloc(struct s_data *d, unsigned long *visited_nodes)
+ {
+ 	int j;
+@@ -490,6 +508,9 @@ static int __fallback_sds_alloc(struct s_data *d, unsigned long *visited_nodes)
+ 			return -ENOMEM;
+ 
+ 		d->fallback_nohz_sds[j] = sds;
++
++		if (__sds_nohz_idle_alloc(sds, j))
++			return -ENOMEM;
+ 	}
+ 
+ 	return 0;
+@@ -502,8 +523,10 @@ static void __fallback_sds_free(struct s_data *d)
+ 	if (!d->fallback_nohz_sds)
+ 		return;
+ 
+-	for (j = 0; j < nr_node_ids; ++j)
++	for (j = 0; j < nr_node_ids; ++j) {
++		__sds_nohz_idle_free(d->fallback_nohz_sds[j]);
+ 		kfree(d->fallback_nohz_sds[j]);
++	}
+ 
+ 	kfree(d->fallback_nohz_sds);
+ 	d->fallback_nohz_sds = NULL;
+@@ -553,6 +576,13 @@ static void update_nohz_domain(int cpu)
+ 
+ #else /* !CONFIG_NO_HZ_COMMON */
+ 
++static int __sds_nohz_idle_alloc(struct sched_domain_shared *sds, int node)
++{
++	return 0;
++}
++
++static void __sds_nohz_idle_free(struct sched_domain_shared *sds) { }
++
+ static inline int __fallback_sds_alloc(struct s_data *d, unsigned long *visited_nodes)
+ {
+ 	return 0;
+@@ -740,8 +770,10 @@ static void destroy_sched_domain(struct sched_domain *sd)
+ 	 */
+ 	free_sched_groups(sd->groups, 1);
+ 
+-	if (sd->shared && atomic_dec_and_test(&sd->shared->ref))
++	if (sd->shared && atomic_dec_and_test(&sd->shared->ref)) {
++		__sds_nohz_idle_free(sd->shared);
+ 		kfree(sd->shared);
++	}
+ 	kfree(sd);
+ }
+ 
+@@ -2524,6 +2556,9 @@ static int __sds_alloc(struct s_data *d, const struct cpumask *cpu_map)
+ 
+ 		bitmap_set(visited_nodes, cpu_to_node(j), 1);
+ 		*per_cpu_ptr(d->sds, j) = sds;
++
++		if (__sds_nohz_idle_alloc(sds, cpu_to_node(j)))
++			return -ENOMEM;
+ 	}
+ 
+ 	if (__fallback_sds_alloc(d, visited_nodes))
+@@ -2539,8 +2574,13 @@ static void __sds_free(struct s_data *d, const struct cpumask *cpu_map)
+ 	if (!d->sds)
+ 		return;
+ 
+-	for_each_cpu(j, cpu_map)
+-		kfree(*per_cpu_ptr(d->sds, j));
++	for_each_cpu(j, cpu_map) {
++		struct sched_domain_shared *sds;
++
++		sds = *per_cpu_ptr(d->sds, j);
++		__sds_nohz_idle_free(sds);
++		kfree(sds);
++	}
+ 
+ 	__fallback_sds_free(d);
+ 
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 11/19] sched/topology: Introduce "nohz_shared_list" to keep track of sd->shared
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (9 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 10/19] sched/topology: Introduce "idle_cpus_mask" in sd->shared K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 12/19] sched/fair: Reorder the barrier in nohz_balance_enter_idle() K Prateek Nayak
+                   ` (7 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Chain together all the "sd_nohz->shared" objects in a RCU protected
+"nohz_shared_list" to get the full view of system for nohz idle
+balancing. Since __sds_nohz_idle_alloc() is also responsible for
+initializing the list_head, rename it to __sds_nohz_idle_alloc_init() to
+fit the bill.
+
+List modifications are protected by the "nohz_shared_list_lock" and
+freeing of sd->shared on the list is delayed by one grace period to
+ensure all the untracked references to the shared object under RCU are
+dropped.
+
+Users of "nohz_shared_list" will be added in subsequent patches where
+all the current users of "nohz.idle_cpus" will be converted to use the
+distributed tracking.
+
+Reviewed-by: Gautham R. Shenoy <gautham.shenoy@amd.com>
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ include/linux/sched/topology.h | 12 ++++---
+ kernel/sched/sched.h           |  1 +
+ kernel/sched/topology.c        | 62 +++++++++++++++++++++++++++++++---
+ 3 files changed, 65 insertions(+), 10 deletions(-)
+
+diff --git a/include/linux/sched/topology.h b/include/linux/sched/topology.h
+index 6db3448e2f00..8400961c1c61 100644
+--- a/include/linux/sched/topology.h
++++ b/include/linux/sched/topology.h
+@@ -64,13 +64,15 @@ extern int sched_domain_level_max;
+ struct sched_group;
+ 
+ struct sched_domain_shared {
+-	atomic_t	ref;
++	atomic_t		ref;
+ #ifdef CONFIG_NO_HZ_COMMON
+-	atomic_t	nr_idle_cpus;
+-	struct cpumask	*idle_cpus_mask;
++	atomic_t		nr_idle_cpus;
++	struct cpumask		*idle_cpus_mask;
++	struct list_head	nohz_list_node;
++	struct rcu_head		rcu;
+ #endif
+-	int		has_idle_cores;
+-	int		nr_idle_scan;
++	int			has_idle_cores;
++	int			nr_idle_scan;
+ };
+ 
+ struct sched_domain {
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 35ffb3926334..9cffcfbef1ae 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -3098,6 +3098,7 @@ extern void cfs_bandwidth_usage_dec(void);
+ #define nohz_flags(cpu)		(&cpu_rq(cpu)->nohz_flags)
+ 
+ DECLARE_PER_CPU(struct sched_domain __rcu *, sd_nohz);
++extern struct list_head nohz_shared_list;
+ 
+ extern void nohz_balance_exit_idle(struct rq *rq);
+ #else /* !CONFIG_NO_HZ_COMMON: */
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index c2832445c578..86e33ed07254 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -468,8 +468,12 @@ struct s_data {
+ 
+ DEFINE_PER_CPU(struct sched_domain __rcu *, sd_nohz);
+ 
+-static int __sds_nohz_idle_alloc(struct sched_domain_shared *sds, int node)
++static DEFINE_RAW_SPINLOCK(nohz_shared_list_lock);
++LIST_HEAD(nohz_shared_list);
++
++static int __sds_nohz_idle_alloc_init(struct sched_domain_shared *sds, int node)
+ {
++	sds->nohz_list_node = (struct list_head)LIST_HEAD_INIT(sds->nohz_list_node);
+ 	sds->idle_cpus_mask = kzalloc_node(cpumask_size(), GFP_KERNEL, node);
+ 
+ 	if (!sds->idle_cpus_mask)
+@@ -483,6 +487,7 @@ static void __sds_nohz_idle_free(struct sched_domain_shared *sds)
+ 	if (!sds)
+ 		return;
+ 
++	WARN_ON_ONCE(!list_empty(&sds->nohz_list_node));
+ 	kfree(sds->idle_cpus_mask);
+ }
+ 
+@@ -509,7 +514,7 @@ static int __fallback_sds_alloc(struct s_data *d, unsigned long *visited_nodes)
+ 
+ 		d->fallback_nohz_sds[j] = sds;
+ 
+-		if (__sds_nohz_idle_alloc(sds, j))
++		if (__sds_nohz_idle_alloc_init(sds, j))
+ 			return -ENOMEM;
+ 	}
+ 
+@@ -560,6 +565,7 @@ static void claim_fallback_sds(struct s_data *d)
+ static void update_nohz_domain(int cpu)
+ {
+ 	struct sched_domain *sd = highest_flag_domain(cpu, SD_SHARE_LLC);
++	struct sched_domain_shared *sds = NULL;
+ 
+ 	/*
+ 	 * If sd_llc doesn't exist, use the lowest sd for nohz idle
+@@ -570,13 +576,52 @@ static void update_nohz_domain(int cpu)
+ 	if (!sd)
+ 		sd = rcu_dereference(cpu_rq(cpu)->sd);
+ 
+-	WARN_ON_ONCE(sd && !sd->shared);
++	if (sd)
++		sds = sd->shared;
++
++	if (sds && list_empty(&sds->nohz_list_node)) {
++		/*
++		 * IRQs should be disabled by the caller since they
++		 * hold the rq_lock.
++		 */
++		lockdep_assert_irqs_disabled();
++
++		guard(raw_spinlock)(&nohz_shared_list_lock);
++		list_add_rcu(&sds->nohz_list_node, &nohz_shared_list);
++	}
++
++	WARN_ON_ONCE(sd && !sds);
+ 	rcu_assign_pointer(per_cpu(sd_nohz, cpu), sd);
+ }
+ 
++static void destroy_sched_domain_shared_rcu(struct rcu_head *rcu)
++{
++	struct sched_domain_shared *sds = container_of(rcu, struct sched_domain_shared, rcu);
++
++	kfree(sds->idle_cpus_mask);
++	kfree(sds);
++}
++
++/*
++ * If sd->shared is on the rcu protected nohz_shared_list,
++ * remove it the list and wait once grace period before
++ * freeing.
++ */
++static int sds_delayed_free(struct sched_domain_shared *sds)
++{
++	if (list_empty(&sds->nohz_list_node))
++		return 0;
++
++	scoped_guard(raw_spinlock_irqsave, &nohz_shared_list_lock)
++		list_del_rcu(&sds->nohz_list_node);
++
++	call_rcu(&sds->rcu, destroy_sched_domain_shared_rcu);
++	return 1;
++}
++
+ #else /* !CONFIG_NO_HZ_COMMON */
+ 
+-static int __sds_nohz_idle_alloc(struct sched_domain_shared *sds, int node)
++static int __sds_nohz_idle_alloc_init(struct sched_domain_shared *sds, int node)
+ {
+ 	return 0;
+ }
+@@ -592,6 +637,7 @@ static inline void __fallback_sds_free(struct s_data *d) { }
+ static inline void assign_fallback_sds(struct s_data *d, struct sched_domain *sd, int cpu) { }
+ static inline void claim_fallback_sds(struct s_data *d) { }
+ static inline void update_nohz_domain(int cpu) { }
++static inline int sds_delayed_free(struct sched_domain_shared *sds) { return 0; }
+ 
+ #endif /* CONFIG_NO_HZ_COMMON */
+ 
+@@ -771,9 +817,15 @@ static void destroy_sched_domain(struct sched_domain *sd)
+ 	free_sched_groups(sd->groups, 1);
+ 
+ 	if (sd->shared && atomic_dec_and_test(&sd->shared->ref)) {
++		if (sds_delayed_free(sd->shared)) {
++			sd->shared = NULL;
++			goto out;
++		}
++
+ 		__sds_nohz_idle_free(sd->shared);
+ 		kfree(sd->shared);
+ 	}
++out:
+ 	kfree(sd);
+ }
+ 
+@@ -2557,7 +2609,7 @@ static int __sds_alloc(struct s_data *d, const struct cpumask *cpu_map)
+ 		bitmap_set(visited_nodes, cpu_to_node(j), 1);
+ 		*per_cpu_ptr(d->sds, j) = sds;
+ 
+-		if (__sds_nohz_idle_alloc(sds, cpu_to_node(j)))
++		if (__sds_nohz_idle_alloc_init(sds, cpu_to_node(j)))
+ 			return -ENOMEM;
+ 	}
+ 
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 12/19] sched/fair: Reorder the barrier in nohz_balance_enter_idle()
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (10 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 11/19] sched/topology: Introduce "nohz_shared_list" to keep track of sd->shared K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 13/19] sched/fair: Extract the main _nohz_idle_balance() loop into a helper K Prateek Nayak
+                   ` (6 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+The smp_mb__after_atomic() in nohz_balance_enter_idle() is used to order
+the setting of the nohz idle CPU on the "nohz.idle_cpus_mask" with the
+write to "nohz.needs_update" as per the comment.
+
+Since set_cpu_sd_state_idle() is now responsible for idle tracking using
+"sd_nohz->shared", reorder the call to set_cpu_sd_state_idle() to come
+before the barrier ensuring the CPU is tracked on the idle mask before
+the update to "nohz.needs_update" is observed.
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index c8226520758d..d13de6feb467 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12544,6 +12544,8 @@ void nohz_balance_enter_idle(int cpu)
+ 	cpumask_set_cpu(cpu, nohz.idle_cpus_mask);
+ 	atomic_inc(&nohz.nr_cpus);
+ 
++	set_cpu_sd_state_idle(cpu);
++
+ 	/*
+ 	 * Ensures that if nohz_idle_balance() fails to observe our
+ 	 * @idle_cpus_mask store, it must observe the @has_blocked
+@@ -12551,8 +12553,6 @@ void nohz_balance_enter_idle(int cpu)
+ 	 */
+ 	smp_mb__after_atomic();
+ 
+-	set_cpu_sd_state_idle(cpu);
+-
+ 	WRITE_ONCE(nohz.needs_update, 1);
+ out:
+ 	/*
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 13/19] sched/fair: Extract the main _nohz_idle_balance() loop into a helper
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (11 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 12/19] sched/fair: Reorder the barrier in nohz_balance_enter_idle() K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 14/19] sched/fair: Convert find_new_ilb() to use nohz_shared_list K Prateek Nayak
+                   ` (5 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+With the distributed nohz idle CPU tracking using the
+"nohz_shared_list", the trick to do the load balancing for the CPU
+in charge of the nohz idle balance at the very end using
+for_each_cpu_warp() will no longer work.
+
+Extract the main loop and the loop body doing the load balancing on
+behalf of an idle target into two separate helpers -
+sched_balance_nohz_idle() and sched_balance_idle_rq() respectively
+keeping consistent with the naming convention in fair.c.
+
+This will help transitioning _nohz_idle_balance() to use the
+"nohz_shared_list" in the subsequent commit.
+
+No functional changes intended.
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c | 161 ++++++++++++++++++++++++++++----------------
+ 1 file changed, 102 insertions(+), 59 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index d13de6feb467..ad6e97be97d5 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12580,6 +12580,97 @@ static bool update_nohz_stats(struct rq *rq)
+ 	return rq->has_blocked_load;
+ }
+ 
++/*
++ * sched_balance_idle_rq(): Balance a target idle rq.
++ * @rq: rq of the idle CPU that may require stats update or balancing.
++ * @flags: nohz flags of the balancing CPU.
++ * @next_balance: Pointer to variable storing the time in jiffies to
++ *		  trigger the next nohz idle balancing.
++ *
++ * Returns: Update flags for caller to take appropriate actions.
++ * NOHZ_STATS_KICK indicates rq still has blocked load after the update.
++ * NOHZ_NEXT_KICK indicates that *next_balance was updated to rq->next_balance.
++ */
++static unsigned int sched_balance_idle_rq(struct rq *rq,
++					  unsigned int flags,
++					  unsigned long *next_balance)
++{
++	unsigned int update_flags = 0;
++
++	/* If rq has blocked load, indicate via NOHZ_STATS_KICK. */
++	if ((flags & NOHZ_STATS_KICK) && update_nohz_stats(rq))
++		update_flags |= NOHZ_STATS_KICK;
++
++	/* If time for next balance is due, do the balance. */
++	if (time_after_eq(jiffies, rq->next_balance)) {
++		struct rq_flags rf;
++
++		rq_lock_irqsave(rq, &rf);
++		update_rq_clock(rq);
++		rq_unlock_irqrestore(rq, &rf);
++
++		if (flags & NOHZ_BALANCE_KICK)
++			sched_balance_domains(rq, CPU_IDLE);
++	}
++
++	/* Indicate update to next_balance via NOHZ_NEXT_KICK. */
++	if (time_after(*next_balance, rq->next_balance)) {
++		*next_balance = rq->next_balance;
++		update_flags |= NOHZ_NEXT_KICK;
++	}
++
++	return update_flags;
++}
++
++/*
++ * sched_balance_nohz_idle(): Core nohz idle balancing loop.
++ * @balancing_cpu: CPU doing the balancing on behalf of all nohz idle CPUs.
++ * @flags: nohz flags of the balancing CPU.
++ * @start: Time in jiffies when nohz indicators were cleared.
++ *
++ * Returns:
++ * < 0 - The balancing CPU turned busy while balancing.
++ *   0 - All CPUs were balanced; No blocked load if @flags had NOHZ_STATS_KICK.
++ * > 0 - One or more idle CPUs still have blocked load if @flags had
++ *	 NOHZ_STATS_KICK.
++ */
++static int sched_balance_nohz_idle(int balancing_cpu, unsigned int flags, unsigned long start)
++{
++	/* Earliest time when we have to do rebalance again */
++	unsigned long next_balance = start + 60*HZ;
++	unsigned int update_flags = 0;
++	int target_cpu;
++
++	/*
++	 * Start with the next CPU after the balancing CPU so we will end with
++	 * balancing CPU and let a chance for other idle cpu to pull load.
++	 */
++	for_each_cpu_wrap(target_cpu, nohz.idle_cpus_mask, balancing_cpu + 1) {
++		if (!idle_cpu(target_cpu))
++			continue;
++
++		/*
++		 * If balancing CPU gets work to do, stop the load balancing
++		 * work being done for other CPUs. Next load balancing owner
++		 * will pick it up.
++		 */
++		if (!idle_cpu(balancing_cpu) && need_resched())
++			return -EBUSY;
++
++		update_flags |= sched_balance_idle_rq(cpu_rq(target_cpu), flags, &next_balance);
++	}
++
++	/*
++	 * next_balance will be updated only when there is a need.
++	 * When the CPU is attached to null domain for ex, it will not be
++	 * updated.
++	 */
++	if (likely(update_flags & NOHZ_NEXT_KICK))
++		nohz.next_balance = next_balance;
++
++	return update_flags & NOHZ_STATS_KICK;
++}
++
+ /*
+  * Internal function that runs load balance for all idle CPUs. The load balance
+  * can be a simple update of blocked load or a complete load balance with
+@@ -12587,14 +12678,8 @@ static bool update_nohz_stats(struct rq *rq)
+  */
+ static void _nohz_idle_balance(struct rq *this_rq, unsigned int flags)
+ {
+-	/* Earliest time when we have to do rebalance again */
+ 	unsigned long now = jiffies;
+-	unsigned long next_balance = now + 60*HZ;
+-	bool has_blocked_load = false;
+-	int update_next_balance = 0;
+-	int this_cpu = this_rq->cpu;
+-	int balance_cpu;
+-	struct rq *rq;
++	int ret;
+ 
+ 	WARN_ON_ONCE((flags & NOHZ_KICK_MASK) == NOHZ_BALANCE_KICK);
+ 
+@@ -12619,60 +12704,18 @@ static void _nohz_idle_balance(struct rq *this_rq, unsigned int flags)
+ 	 */
+ 	smp_mb();
+ 
+-	/*
+-	 * Start with the next CPU after this_cpu so we will end with this_cpu and let a
+-	 * chance for other idle cpu to pull load.
+-	 */
+-	for_each_cpu_wrap(balance_cpu,  nohz.idle_cpus_mask, this_cpu+1) {
+-		if (!idle_cpu(balance_cpu))
+-			continue;
+-
+-		/*
+-		 * If this CPU gets work to do, stop the load balancing
+-		 * work being done for other CPUs. Next load
+-		 * balancing owner will pick it up.
+-		 */
+-		if (!idle_cpu(this_cpu) && need_resched()) {
+-			if (flags & NOHZ_STATS_KICK)
+-				has_blocked_load = true;
+-			if (flags & NOHZ_NEXT_KICK)
+-				WRITE_ONCE(nohz.needs_update, 1);
+-			goto abort;
+-		}
+-
+-		rq = cpu_rq(balance_cpu);
+-
+-		if (flags & NOHZ_STATS_KICK)
+-			has_blocked_load |= update_nohz_stats(rq);
+-
+-		/*
+-		 * If time for next balance is due,
+-		 * do the balance.
+-		 */
+-		if (time_after_eq(jiffies, rq->next_balance)) {
+-			struct rq_flags rf;
+-
+-			rq_lock_irqsave(rq, &rf);
+-			update_rq_clock(rq);
+-			rq_unlock_irqrestore(rq, &rf);
+-
+-			if (flags & NOHZ_BALANCE_KICK)
+-				sched_balance_domains(rq, CPU_IDLE);
+-		}
+-
+-		if (time_after(next_balance, rq->next_balance)) {
+-			next_balance = rq->next_balance;
+-			update_next_balance = 1;
+-		}
+-	}
++	ret = sched_balance_nohz_idle(cpu_of(this_rq), flags, now);
+ 
+ 	/*
+-	 * next_balance will be updated only when there is a need.
+-	 * When the CPU is attached to null domain for ex, it will not be
+-	 * updated.
++	 * The balancing CPU turned busy. Set nohz.{needs_update,has_blocked}
++	 * indicators to ensure next CPU observing them triggers nohz idle
++	 * balance again.
+ 	 */
+-	if (likely(update_next_balance))
+-		nohz.next_balance = next_balance;
++	if (ret < 0) {
++		if (flags & NOHZ_NEXT_KICK)
++			WRITE_ONCE(nohz.needs_update, 1);
++		goto abort;
++	}
+ 
+ 	if (flags & NOHZ_STATS_KICK)
+ 		WRITE_ONCE(nohz.next_blocked,
+@@ -12680,7 +12723,7 @@ static void _nohz_idle_balance(struct rq *this_rq, unsigned int flags)
+ 
+ abort:
+ 	/* There is still blocked load, enable periodic update */
+-	if (has_blocked_load)
++	if (ret)
+ 		WRITE_ONCE(nohz.has_blocked, 1);
+ }
+ 
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 14/19] sched/fair: Convert find_new_ilb() to use nohz_shared_list
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (12 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 13/19] sched/fair: Extract the main _nohz_idle_balance() loop into a helper K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 15/19] sched/fair: Introduce sched_asym_prefer_idle() for ILB kick K Prateek Nayak
+                   ` (4 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Use "nohz_shared_list" in find_new_ilb() instead of the global
+"nohz.idle_cpus_mask".
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index ad6e97be97d5..5e7198078d19 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12263,18 +12263,27 @@ static inline int on_null_domain(struct rq *rq)
+  */
+ static inline int find_new_ilb(void)
+ {
++	struct sched_domain_shared *sds;
+ 	const struct cpumask *hk_mask;
+-	int ilb_cpu;
+ 
+ 	hk_mask = housekeeping_cpumask(HK_TYPE_KERNEL_NOISE);
+ 
+-	for_each_cpu_and(ilb_cpu, nohz.idle_cpus_mask, hk_mask) {
++	guard(rcu)();
++
++	list_for_each_entry_rcu(sds, &nohz_shared_list, nohz_list_node) {
++		int ilb_cpu;
+ 
+-		if (ilb_cpu == smp_processor_id())
++		/* No idle CPUs in this domain */
++		if (!atomic_read(&sds->nr_idle_cpus))
+ 			continue;
+ 
+-		if (idle_cpu(ilb_cpu))
+-			return ilb_cpu;
++		for_each_cpu_and(ilb_cpu, sds->idle_cpus_mask, hk_mask) {
++			if (ilb_cpu == smp_processor_id())
++				continue;
++
++			if (idle_cpu(ilb_cpu))
++				return ilb_cpu;
++		}
+ 	}
+ 
+ 	return -1;
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 15/19] sched/fair: Introduce sched_asym_prefer_idle() for ILB kick
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (13 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 14/19] sched/fair: Convert find_new_ilb() to use nohz_shared_list K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 16/19] sched/fair: Convert sched_balance_nohz_idle() to use nohz_shared_list K Prateek Nayak
+                   ` (3 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+nohz_balancer_kick() currently depends on "nohz.idle_cpus_maks" to kick
+off an idle balance if it finds a more preferred CPU in nohz idle state.
+
+Move the detection logic into sched_asym_prefer_idle() and use the
+distributed "sd->shared" based nohz tracking to kick ILB if a more
+preferred CPU is found idle.
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c | 70 ++++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 54 insertions(+), 16 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 5e7198078d19..d309cb73d428 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12289,6 +12289,56 @@ static inline int find_new_ilb(void)
+ 	return -1;
+ }
+ 
++static inline int
++__asym_prefer_idle(int cpu, struct sched_domain *sd_asym, struct cpumask *idle_mask)
++{
++	int i;
++
++	for_each_cpu_and(i, idle_mask, sched_domain_span(sd_asym)) {
++		if (sched_asym(sd_asym, i, cpu))
++			return 1;
++	}
++
++	return 0;
++}
++
++static int sched_asym_prefer_idle(int cpu, struct sched_domain *sd_asym)
++{
++	struct sched_domain *sd = rcu_dereference(per_cpu(sd_nohz, cpu));
++	struct sched_domain_shared *sds;
++
++	if (!sd)
++		return 0;
++
++	/*
++	 * If sd_asym_packing is a subset of sd_llc, don't traverse
++	 * the nohz_shared_list and directly use the mask from
++	 * sd_nohz->shared to find it a preferred CPU is idling.
++	 */
++	if (sd_asym->flags & SD_SHARE_LLC) {
++		sds = sd->shared;
++
++		if (sds &&
++		    atomic_read(&sds->nr_idle_cpus) &&
++		    __asym_prefer_idle(cpu, sd_asym, sds->idle_cpus_mask))
++			return 1;
++
++		return 0;
++	}
++
++	/* Try the entire list id sd_asym_packing is larger than sd_nohz. */
++	list_for_each_entry_rcu(sds, &nohz_shared_list, nohz_list_node) {
++		/* No idle CPUs in this domain */
++		if (!atomic_read(&sds->nr_idle_cpus))
++			continue;
++
++		if (__asym_prefer_idle(cpu, sd_asym, sds->idle_cpus_mask))
++			return 1;
++	}
++
++	return 0;
++}
++
+ /*
+  * Kick a CPU to do the NOHZ balancing, if it is time for it, via a cross-CPU
+  * SMP function call (IPI).
+@@ -12343,7 +12393,7 @@ static void nohz_balancer_kick(struct rq *rq)
+ 	unsigned long now = jiffies;
+ 	struct sched_domain_shared *sds;
+ 	struct sched_domain *sd;
+-	int nr_busy, i, cpu = rq->cpu;
++	int nr_busy, cpu = rq->cpu;
+ 	unsigned int flags = 0;
+ 
+ 	if (unlikely(rq->idle_balance))
+@@ -12389,21 +12439,9 @@ static void nohz_balancer_kick(struct rq *rq)
+ 	}
+ 
+ 	sd = rcu_dereference(per_cpu(sd_asym_packing, cpu));
+-	if (sd) {
+-		/*
+-		 * When ASYM_PACKING; see if there's a more preferred CPU
+-		 * currently idle; in which case, kick the ILB to move tasks
+-		 * around.
+-		 *
+-		 * When balancing between cores, all the SMT siblings of the
+-		 * preferred CPU must be idle.
+-		 */
+-		for_each_cpu_and(i, sched_domain_span(sd), nohz.idle_cpus_mask) {
+-			if (sched_asym(sd, i, cpu)) {
+-				flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
+-				goto unlock;
+-			}
+-		}
++	if (sd && sched_asym_prefer_idle(cpu, sd)) {
++		flags = NOHZ_STATS_KICK | NOHZ_BALANCE_KICK;
++		goto unlock;
+ 	}
+ 
+ 	sd = rcu_dereference(per_cpu(sd_asym_cpucapacity, cpu));
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 16/19] sched/fair: Convert sched_balance_nohz_idle() to use nohz_shared_list
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (14 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 15/19] sched/fair: Introduce sched_asym_prefer_idle() for ILB kick K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 17/19] sched/fair: Remove "nohz.idle_cpus_mask" K Prateek Nayak
+                   ` (2 subsequent siblings)
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Convert the main nohz idle load balancing loop in
+sched_balance_nohz_idle() to use the distributed nohz idle tracking
+mechanism via "nohz_shared_list".
+
+The nifty trick to balance the nohz owner at the very end using
+for_each_cpu_wrap() is lost during this transition. Special care is
+taken to ensure nohz.{needs_update,has_blocked} are set correctly for a
+reattempt if the balance_cpu turns bust towards the end of nohz
+balancing preserving the current behavior.
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c | 62 ++++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 47 insertions(+), 15 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index d309cb73d428..c7ac8e7094ed 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -12685,27 +12685,59 @@ static int sched_balance_nohz_idle(int balancing_cpu, unsigned int flags, unsign
+ {
+ 	/* Earliest time when we have to do rebalance again */
+ 	unsigned long next_balance = start + 60*HZ;
++	struct sched_domain_shared *sds;
+ 	unsigned int update_flags = 0;
+-	int target_cpu;
+ 
+-	/*
+-	 * Start with the next CPU after the balancing CPU so we will end with
+-	 * balancing CPU and let a chance for other idle cpu to pull load.
+-	 */
+-	for_each_cpu_wrap(target_cpu, nohz.idle_cpus_mask, balancing_cpu + 1) {
+-		if (!idle_cpu(target_cpu))
++	rcu_read_lock();
++	list_for_each_entry_rcu(sds, &nohz_shared_list, nohz_list_node) {
++		int target_cpu;
++
++		/* No idle CPUs in this domain */
++		if (!atomic_read(&sds->nr_idle_cpus))
+ 			continue;
+ 
+-		/*
+-		 * If balancing CPU gets work to do, stop the load balancing
+-		 * work being done for other CPUs. Next load balancing owner
+-		 * will pick it up.
+-		 */
+-		if (!idle_cpu(balancing_cpu) && need_resched())
+-			return -EBUSY;
++		for_each_cpu(target_cpu, sds->idle_cpus_mask) {
++			/* Deal with the balancing CPU at the end. */
++			if (balancing_cpu == target_cpu)
++				continue;
++
++			if (!idle_cpu(target_cpu))
++				continue;
+ 
+-		update_flags |= sched_balance_idle_rq(cpu_rq(target_cpu), flags, &next_balance);
++			/*
++			 * If balancing CPU gets work to do, stop the load balancing
++			 * work being done for other CPUs. Next load balancing owner
++			 * will pick it up.
++			 */
++			if (!idle_cpu(balancing_cpu) && need_resched()) {
++				rcu_read_unlock();
++				return -EBUSY;
++			}
++
++			update_flags |= sched_balance_idle_rq(cpu_rq(target_cpu),
++						flags, &next_balance);
++		}
+ 	}
++	rcu_read_unlock();
++
++	/*
++	 * If we reach here, all CPUs have been balance and it is time
++	 * to balance the balancing_cpu.
++	 *
++	 * If coincidentally the balancing CPU turns busy at this point
++	 * and is the only nohz idle CPU, we still need to set
++	 * nohz.{needs_update,has_blocked} since the CPU can transition
++	 * back to nohz idle before the tick hits.
++	 *
++	 * In the above case, rq->nohz_tick_stopped is never cleared and
++	 * nohz_balance_enter_idle() skips setting nohz.has_blocked.
++	 * Return -EBUSY instructing the caller to reset the nohz
++	 * signals allowing a reattempt.
++	 */
++	if (!idle_cpu(balancing_cpu) && need_resched())
++		return -EBUSY;
++
++	update_flags |= sched_balance_idle_rq(cpu_rq(balancing_cpu), flags, &next_balance);
+ 
+ 	/*
+ 	 * next_balance will be updated only when there is a need.
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 17/19] sched/fair: Remove "nohz.idle_cpus_mask"
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (15 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 16/19] sched/fair: Convert sched_balance_nohz_idle() to use nohz_shared_list K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 18/19] sched/fair: Optimize global "nohz.nr_cpus" tracking K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 19/19] sched/topology: Add basic debug information for "nohz_shared_list" K Prateek Nayak
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+All users of "nohz.idle_cpus_mask" have been converted to use the
+distributed nohz idle tracking using "nohz_shared_list". Get rid of the
+centralized "nohz.idle_cpus_mask" based tracking.
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c | 27 ++++++++++++---------------
+ 1 file changed, 12 insertions(+), 15 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index c7ac8e7094ed..5b693bd0fab4 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -7169,7 +7169,6 @@ static DEFINE_PER_CPU(cpumask_var_t, should_we_balance_tmpmask);
+ #ifdef CONFIG_NO_HZ_COMMON
+ 
+ static struct {
+-	cpumask_var_t idle_cpus_mask;
+ 	atomic_t nr_cpus;
+ 	int has_blocked;		/* Idle CPUS has blocked load */
+ 	int needs_update;		/* Newly idle CPUs need their next_balance collated */
+@@ -12517,7 +12516,6 @@ void nohz_balance_exit_idle(struct rq *rq)
+ 		return;
+ 
+ 	WRITE_ONCE(rq->nohz_tick_stopped, 0);
+-	cpumask_clear_cpu(rq->cpu, nohz.idle_cpus_mask);
+ 	atomic_dec(&nohz.nr_cpus);
+ 
+ 	set_cpu_sd_state_busy(rq->cpu);
+@@ -12576,8 +12574,9 @@ void nohz_balance_enter_idle(int cpu)
+ 	/*
+ 	 * The tick is still stopped but load could have been added in the
+ 	 * meantime. We set the nohz.has_blocked flag to trig a check of the
+-	 * *_avg. The CPU is already part of nohz.idle_cpus_mask so the clear
+-	 * of nohz.has_blocked can only happen after checking the new load
++	 * *_avg. The CPU is already part of sd_nohz->idle_cpus_mask so the
++	 * clear of nohz.has_blocked can only happen after checking the new
++	 * load
+ 	 */
+ 	if (READ_ONCE(rq->nohz_tick_stopped))
+ 		goto out;
+@@ -12588,7 +12587,6 @@ void nohz_balance_enter_idle(int cpu)
+ 
+ 	WRITE_ONCE(rq->nohz_tick_stopped, 1);
+ 
+-	cpumask_set_cpu(cpu, nohz.idle_cpus_mask);
+ 	atomic_inc(&nohz.nr_cpus);
+ 
+ 	set_cpu_sd_state_idle(cpu);
+@@ -12832,15 +12830,15 @@ static bool nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
+  * entering idle state. Here we run ILB directly without issuing IPIs.
+  *
+  * Note that when this function is called, the tick may not yet be stopped on
+- * this CPU yet. nohz.idle_cpus_mask is updated only when tick is stopped and
+- * cleared on the next busy tick. In other words, nohz.idle_cpus_mask updates
+- * don't align with CPUs enter/exit idle to avoid bottlenecks due to high idle
+- * entry/exit rate (usec). So it is possible that _nohz_idle_balance() is
+- * called from this function on (this) CPU that's not yet in the mask. That's
+- * OK because the goal of nohz_run_idle_balance() is to run ILB only for
+- * updating the blocked load of already idle CPUs without waking up one of
+- * those idle CPUs and outside the preempt disable / IRQ off phase of the local
+- * cpu about to enter idle, because it can take a long time.
++ * this CPU yet. sd_nohz->idle_cpus_mask is updated only when tick is stopped
++ * and cleared on the next busy tick. In other words, sd_nohz->idle_cpus_mask
++ * updates don't align with CPUs enter/exit idle to avoid bottlenecks due to
++ * high idle entry/exit rate (usec). So it is possible that
++ * _nohz_idle_balance() is called from this function on (this) CPU that's not
++ * yet in the mask. That's OK because the goal of nohz_run_idle_balance() is to
++ * run ILB only for updating the blocked load of already idle CPUs without
++ * waking up one of those idle CPUs and outside the preempt disable / IRQ off
++ * phase of the local cpu about to enter idle, because it can take a long time.
+  */
+ void nohz_run_idle_balance(int cpu)
+ {
+@@ -13841,6 +13839,5 @@ __init void init_sched_fair_class(void)
+ #ifdef CONFIG_NO_HZ_COMMON
+ 	nohz.next_balance = jiffies;
+ 	nohz.next_blocked = jiffies;
+-	zalloc_cpumask_var(&nohz.idle_cpus_mask, GFP_NOWAIT);
+ #endif
+ }
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 18/19] sched/fair: Optimize global "nohz.nr_cpus" tracking
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (16 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 17/19] sched/fair: Remove "nohz.idle_cpus_mask" K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  2025-09-04  4:15 ` [RFC PATCH 19/19] sched/topology: Add basic debug information for "nohz_shared_list" K Prateek Nayak
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Optimize "nohz.nr_cpus" by tracking number of "sd_nohz->shared" with
+non-zero "nr_idle_cpus" count via "nohz.nr_doms" and only updating at
+the boundary of "sd_nohz->shared->nr_idle_cpus" going from 0 -> 1 and
+back from 1 -> 0.
+
+This also introduces a chance of double accounting when a nohz idle
+entry or the tick races with hotplug or cpuset as described in
+__nohz_exit_idle_tracking().
+
+__nohz_exit_idle_tracking() called when the sched_domain_shared nodes
+tracking idle CPUs are freed is used to correct any potential double
+accounting which can unnecessarily trigger nohz idle balances even when
+all the CPUs have tick enabled.
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+ kernel/sched/fair.c     | 63 ++++++++++++++++++++++++++++++++++++-----
+ kernel/sched/sched.h    |  1 +
+ kernel/sched/topology.c |  1 +
+ 3 files changed, 58 insertions(+), 7 deletions(-)
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 5b693bd0fab4..d65acf7ea12e 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -7169,7 +7169,7 @@ static DEFINE_PER_CPU(cpumask_var_t, should_we_balance_tmpmask);
+ #ifdef CONFIG_NO_HZ_COMMON
+ 
+ static struct {
+-	atomic_t nr_cpus;
++	atomic_t nr_doms;
+ 	int has_blocked;		/* Idle CPUS has blocked load */
+ 	int needs_update;		/* Newly idle CPUs need their next_balance collated */
+ 	unsigned long next_balance;     /* in jiffy units */
+@@ -12408,7 +12408,7 @@ static void nohz_balancer_kick(struct rq *rq)
+ 	 * None are in tickless mode and hence no need for NOHZ idle load
+ 	 * balancing:
+ 	 */
+-	if (likely(!atomic_read(&nohz.nr_cpus)))
++	if (likely(!atomic_read(&nohz.nr_doms)))
+ 		return;
+ 
+ 	if (READ_ONCE(nohz.has_blocked) &&
+@@ -12505,7 +12505,8 @@ static void set_cpu_sd_state_busy(int cpu)
+ 		return;
+ 
+ 	cpumask_clear_cpu(cpu, sd->shared->idle_cpus_mask);
+-	atomic_dec(&sd->shared->nr_idle_cpus);
++	if (!atomic_dec_return(&sd->shared->nr_idle_cpus))
++		atomic_dec(&nohz.nr_doms);
+ }
+ 
+ void nohz_balance_exit_idle(struct rq *rq)
+@@ -12516,7 +12517,6 @@ void nohz_balance_exit_idle(struct rq *rq)
+ 		return;
+ 
+ 	WRITE_ONCE(rq->nohz_tick_stopped, 0);
+-	atomic_dec(&nohz.nr_cpus);
+ 
+ 	set_cpu_sd_state_busy(rq->cpu);
+ }
+@@ -12535,7 +12535,58 @@ static void set_cpu_sd_state_idle(int cpu)
+ 		return;
+ 
+ 	cpumask_set_cpu(cpu, sd->shared->idle_cpus_mask);
+-	atomic_inc(&sd->shared->nr_idle_cpus);
++	if (!atomic_fetch_inc(&sd->shared->nr_idle_cpus))
++		atomic_inc(&nohz.nr_doms);
++}
++
++/*
++ * Correct nohz.nr_doms if sd_nohz->shared was found to have non-zero
++ * nr_idle_cpus when freeing. No local references to sds remain at
++ * this point and the only reference possible via "nohz_shared_list"
++ * will be dropped after the grace period.
++ */
++void __nohz_exit_idle_tracking(struct sched_domain_shared *sds)
++{
++
++	/*
++	 * It is possible for a idle entry to race with sched domain rebuild like:
++	 *
++	 *  CPU0 (hotplug)			CPU1 (nohz idle)
++	 *
++	 *  rq->offline(CPU1)
++	 *    set_cpu_sd_state_busy()
++	 *    rq->sd = sdd;			# Processes IPI, re-enters nohz idle
++	 *    ...				# For old sd_nohz
++	 *    ...				atomic_fetch_inc(&sd_nohz->shared->nr_idle_cpus);
++	 *    ...				atomic_inc(&nohz.nr_doms); # XXX: Accounted once
++	 *    update_top_cache_domains()
++	 *  rq->online(CPU1)
++	 *  # rq->nohz_tick_stopped is true
++	 *  set_cpu_sd_state_idle()
++	 *    # For new sd_nohz
++	 *    atomic_fetch_inc(&sd_nohz->shared->nr_idle_cpus);
++	 *    atomic_inc(&nohz.nr_doms); # XXX: Accounted twice
++	 *  ...
++	 *
++	 * "nohz.nr_doms" is used as an entry criteria in nohz_balancer_kick()
++	 * and this double accounting can lead to wasted idle balancing
++	 * triggers. Use this path to correct the accounting:
++	 *
++	 *  # In sds_delayed_free()
++	 *  __nohz_exit_idle_tracking(sds)
++	 *    # sd->shared->nr_idle_cpus is != 0
++	 *    atomic_dec(&nohz.nr_doms); # XXX: Fixes nohz.nr_doms
++	 */
++	if (atomic_read(&sds->nr_idle_cpus)) {
++		/*
++		 * Reset the "nr_idle_cpus" indicator to prevent
++		 * existing readers from traversing the idle mask
++		 * to reduce chances of traversing the same CPU
++		 * twice.
++		 */
++		atomic_set(&sds->nr_idle_cpus, 0);
++		atomic_dec(&nohz.nr_doms);
++	}
+ }
+ 
+ static void cpu_sd_exit_nohz_balance(struct rq *rq)
+@@ -12587,8 +12638,6 @@ void nohz_balance_enter_idle(int cpu)
+ 
+ 	WRITE_ONCE(rq->nohz_tick_stopped, 1);
+ 
+-	atomic_inc(&nohz.nr_cpus);
+-
+ 	set_cpu_sd_state_idle(cpu);
+ 
+ 	/*
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 9cffcfbef1ae..fcf4503caada 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -3100,6 +3100,7 @@ extern void cfs_bandwidth_usage_dec(void);
+ DECLARE_PER_CPU(struct sched_domain __rcu *, sd_nohz);
+ extern struct list_head nohz_shared_list;
+ 
++extern void __nohz_exit_idle_tracking(struct sched_domain_shared *sds);
+ extern void nohz_balance_exit_idle(struct rq *rq);
+ #else /* !CONFIG_NO_HZ_COMMON: */
+ static inline void nohz_balance_exit_idle(struct rq *rq) { }
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index 86e33ed07254..ee9eed8470ba 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -615,6 +615,7 @@ static int sds_delayed_free(struct sched_domain_shared *sds)
+ 	scoped_guard(raw_spinlock_irqsave, &nohz_shared_list_lock)
+ 		list_del_rcu(&sds->nohz_list_node);
+ 
++	__nohz_exit_idle_tracking(sds);
+ 	call_rcu(&sds->rcu, destroy_sched_domain_shared_rcu);
+ 	return 1;
+ }
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+* [RFC PATCH 19/19] sched/topology: Add basic debug information for "nohz_shared_list"
+  2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+                   ` (17 preceding siblings ...)
+  2025-09-04  4:15 ` [RFC PATCH 18/19] sched/fair: Optimize global "nohz.nr_cpus" tracking K Prateek Nayak
+@ 2025-09-04  4:15 ` K Prateek Nayak
+  18 siblings, 0 replies; 20+ messages in thread
+From: K Prateek Nayak @ 2025-09-04  4:15 UTC (permalink / raw)
+  To: Ingo Molnar, Peter Zijlstra, Juri Lelli, Vincent Guittot,
+	Anna-Maria Behnsen, Frederic Weisbecker, Thomas Gleixner,
+	linux-kernel
+  Cc: Dietmar Eggemann, Steven Rostedt, Ben Segall, Mel Gorman,
+	Valentin Schneider, K Prateek Nayak, Gautham R. Shenoy,
+	Swapnil Sapkal
+
+Introduce debug_nohz_shared_list_update() to count the number of entries
+in "nohz_shared_list" after each list modification.
+
+XXX: There isn't a great way to jump from a sched_domain_shared object
+to the sched_domain struct that references it which prevents printing
+more information about the sched domain that was linked with the
+shared object.
+
+Signed-off-by: K Prateek Nayak <kprateek.nayak@amd.com>
+---
+Note: Something in this patch upsets the LOCKDEP + sched_verbose cmdline
+combo and hangs my system soon into boot. LOCKDEP alone or sched_verbose
+cmdline alone doesn't have this effect and until Patch 18 even the
+offending combo runs fine.
+
+DEBUG_LIST didn't point to anything and I'm still scrathing my head on
+why this may be the case (maybe I need some glasses).
+---
+ kernel/sched/topology.c | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/sched/topology.c b/kernel/sched/topology.c
+index ee9eed8470ba..85b46ba594a3 100644
+--- a/kernel/sched/topology.c
++++ b/kernel/sched/topology.c
+@@ -471,6 +471,20 @@ DEFINE_PER_CPU(struct sched_domain __rcu *, sd_nohz);
+ static DEFINE_RAW_SPINLOCK(nohz_shared_list_lock);
+ LIST_HEAD(nohz_shared_list);
+ 
++static void debug_nohz_shared_list_update(void)
++{
++	struct sched_domain_shared *sds;
++	int count = 0;
++
++	if (!sched_debug())
++		return;
++
++	list_for_each_entry(sds, &nohz_shared_list, nohz_list_node)
++		count++;
++
++	pr_info("%s: %d nohz_shared_list entries found.\n", __func__, count);
++}
++
+ static int __sds_nohz_idle_alloc_init(struct sched_domain_shared *sds, int node)
+ {
+ 	sds->nohz_list_node = (struct list_head)LIST_HEAD_INIT(sds->nohz_list_node);
+@@ -588,6 +602,7 @@ static void update_nohz_domain(int cpu)
+ 
+ 		guard(raw_spinlock)(&nohz_shared_list_lock);
+ 		list_add_rcu(&sds->nohz_list_node, &nohz_shared_list);
++		debug_nohz_shared_list_update();
+ 	}
+ 
+ 	WARN_ON_ONCE(sd && !sds);
+@@ -612,8 +627,10 @@ static int sds_delayed_free(struct sched_domain_shared *sds)
+ 	if (list_empty(&sds->nohz_list_node))
+ 		return 0;
+ 
+-	scoped_guard(raw_spinlock_irqsave, &nohz_shared_list_lock)
++	scoped_guard(raw_spinlock_irqsave, &nohz_shared_list_lock) {
+ 		list_del_rcu(&sds->nohz_list_node);
++		debug_nohz_shared_list_update();
++	}
+ 
+ 	__nohz_exit_idle_tracking(sds);
+ 	call_rcu(&sds->rcu, destroy_sched_domain_shared_rcu);
+-- 
+2.34.1
+
+
+^ permalink raw reply related	[flat|nested] 20+ messages in thread
+end of thread, other threads:[~2025-09-04  4:21 UTC | newest]
+
+Thread overview: 20+ messages (download: mbox.gz follow: Atom feed
+-- links below jump to the message on this page --
+2025-09-04  4:14 [RFC PATCH 00/19] sched/fair: Distributed nohz idle CPU tracking for idle load balancing K Prateek Nayak
+2025-09-04  4:14 ` [RFC PATCH 01/19] sched/fair: Simplify set_cpu_sd_state_*() with guards K Prateek Nayak
+2025-09-04  4:14 ` [RFC PATCH 02/19] sched/topology: Optimize sd->shared allocation and assignment K Prateek Nayak
+2025-09-04  4:14 ` [RFC PATCH 03/19] sched/fair: Use rq->nohz_tick_stopped in update_nohz_stats() K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 04/19] sched/fair: Use xchg() to set sd->nohz_idle state K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 05/19] sched/topology: Attach new hierarchy in rq_attach_root() K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 06/19] sched/fair: Fixup sd->nohz_idle state during hotplug / cpuset K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 07/19] sched/fair: Account idle cpus instead of busy cpus in sd->shared K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 08/19] sched/topology: Introduce fallback sd->shared assignment K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 09/19] sched/topology: Introduce percpu sd_nohz for nohz state tracking K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 10/19] sched/topology: Introduce "idle_cpus_mask" in sd->shared K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 11/19] sched/topology: Introduce "nohz_shared_list" to keep track of sd->shared K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 12/19] sched/fair: Reorder the barrier in nohz_balance_enter_idle() K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 13/19] sched/fair: Extract the main _nohz_idle_balance() loop into a helper K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 14/19] sched/fair: Convert find_new_ilb() to use nohz_shared_list K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 15/19] sched/fair: Introduce sched_asym_prefer_idle() for ILB kick K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 16/19] sched/fair: Convert sched_balance_nohz_idle() to use nohz_shared_list K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 17/19] sched/fair: Remove "nohz.idle_cpus_mask" K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 18/19] sched/fair: Optimize global "nohz.nr_cpus" tracking K Prateek Nayak
+2025-09-04  4:15 ` [RFC PATCH 19/19] sched/topology: Add basic debug information for "nohz_shared_list" K Prateek Nayak
+This is a public inbox, see mirroring instructions
+for how to clone and mirror all data and code used for this inbox;
+as well as URLs for NNTP newsgroup(s).
