@@ -1,0 +1,760 @@
+1
+00:00:01,140 --> 00:00:02,760
+Instructor: So during the next few sections,
+
+2
+00:00:02,760 --> 00:00:04,770
+we're gonna be building our very own
+
+3
+00:00:04,770 --> 00:00:06,990
+Microsoft Excel spreadsheet.
+
+4
+00:00:06,990 --> 00:00:09,900
+We're gonna start out with just a completely blank worksheet
+
+5
+00:00:09,900 --> 00:00:13,260
+and we're gonna build up a monthly budget spreadsheet.
+
+6
+00:00:13,260 --> 00:00:16,230
+We're gonna start out, just simple, take it step by step.
+
+7
+00:00:16,230 --> 00:00:18,330
+We're gonna do things like enter labels
+
+8
+00:00:18,330 --> 00:00:20,310
+like our column and our row labels.
+
+9
+00:00:20,310 --> 00:00:22,260
+We're gonna enter some numeric values in there
+
+10
+00:00:22,260 --> 00:00:25,860
+representing our dollar amounts, our currency values
+
+11
+00:00:25,860 --> 00:00:27,900
+the hard earned money that we're spending each
+
+12
+00:00:27,900 --> 00:00:29,850
+and every month on all of our bills.
+
+13
+00:00:29,850 --> 00:00:32,759
+We'll talk about building calculations so we can get things
+
+14
+00:00:32,759 --> 00:00:36,420
+like totals for each month or each bill.
+
+15
+00:00:36,420 --> 00:00:39,240
+I'll talk about some other types of calculations as well.
+
+16
+00:00:39,240 --> 00:00:41,100
+And we're gonna do some formatting.
+
+17
+00:00:41,100 --> 00:00:43,170
+We're gonna make it look super awesome
+
+18
+00:00:43,170 --> 00:00:46,050
+but we're gonna start from complete scratch.
+
+19
+00:00:46,050 --> 00:00:48,870
+So our first step, we've gotta open up a new
+
+20
+00:00:48,870 --> 00:00:50,970
+Excel document and we're gonna start to put some
+
+21
+00:00:50,970 --> 00:00:54,420
+labels or headers into our spreadsheets.
+
+22
+00:00:54,420 --> 00:00:55,710
+So here we go.
+
+23
+00:00:55,710 --> 00:00:58,830
+So I'm back into the Excel interface and I'm looking
+
+24
+00:00:58,830 --> 00:01:03,830
+at the new section of the backstage view or of the file tab.
+
+25
+00:01:04,470 --> 00:01:06,300
+So now inside of here, I'm gonna go ahead
+
+26
+00:01:06,300 --> 00:01:09,513
+and grab blank workbook and I'll give that a double click.
+
+27
+00:01:10,650 --> 00:01:13,110
+All right, here we are. We've done this once before.
+
+28
+00:01:13,110 --> 00:01:17,010
+We've opened up a new blank Excel document and here we are.
+
+29
+00:01:17,010 --> 00:01:20,730
+Now I'm on office 365.
+
+30
+00:01:20,730 --> 00:01:22,920
+I subscribe to the monthly subscription
+
+31
+00:01:22,920 --> 00:01:25,260
+through Microsoft to get access
+
+32
+00:01:25,260 --> 00:01:27,990
+to the office applications, Excel, Word,
+
+33
+00:01:27,990 --> 00:01:29,460
+PowerPoint and so on.
+
+34
+00:01:29,460 --> 00:01:31,380
+Now, occasionally, and I just really want to
+
+35
+00:01:31,380 --> 00:01:33,900
+give you a heads up, if you're also a part
+
+36
+00:01:33,900 --> 00:01:37,050
+of the Office 365 subscription, whether you get that
+
+37
+00:01:37,050 --> 00:01:39,720
+through a personal edition or something through work
+
+38
+00:01:39,720 --> 00:01:42,510
+Microsoft likes to push out updates.
+
+39
+00:01:42,510 --> 00:01:47,310
+Now as of this recording, it is February of 2019.
+
+40
+00:01:48,510 --> 00:01:51,930
+This is our current release of Microsoft Excel.
+
+41
+00:01:51,930 --> 00:01:53,100
+Now when you open it up
+
+42
+00:01:53,100 --> 00:01:55,200
+your interface might look a little bit different
+
+43
+00:01:55,200 --> 00:01:57,720
+'cause Microsoft pushes out updates.
+
+44
+00:01:57,720 --> 00:01:58,830
+So nothing big.
+
+45
+00:01:58,830 --> 00:02:01,800
+I've been teaching Excel for years now
+
+46
+00:02:01,800 --> 00:02:05,820
+and I teach it virtually exactly the same way.
+
+47
+00:02:05,820 --> 00:02:08,280
+I've been teaching ever since the early,
+
+48
+00:02:08,280 --> 00:02:12,993
+early editions of Microsoft Excel 2000 back in 95,
+
+49
+00:02:14,303 --> 00:02:16,320
+Excel's been Excel for years.
+
+50
+00:02:16,320 --> 00:02:19,080
+Of course, Microsoft has introduced new features
+
+51
+00:02:19,080 --> 00:02:22,170
+and whatnot, and we'll get into those new features.
+
+52
+00:02:22,170 --> 00:02:24,570
+And I wanna, I wanna talk about all the bells and whistles
+
+53
+00:02:24,570 --> 00:02:27,030
+that Microsoft adds to additional versions
+
+54
+00:02:27,030 --> 00:02:30,270
+but it's still underlying, it's still Excel.
+
+55
+00:02:30,270 --> 00:02:33,180
+Now, once again, if you are on the office 365
+
+56
+00:02:33,180 --> 00:02:36,420
+you may occasionally when you first launch up Excel,
+
+57
+00:02:36,420 --> 00:02:38,767
+you may get a yellow bar at the top of your screen saying.
+
+58
+00:02:38,767 --> 00:02:42,030
+"Hey Microsoft's got some updates ready for you.
+
+59
+00:02:42,030 --> 00:02:43,890
+Do you want to go ahead and update?"
+
+60
+00:02:43,890 --> 00:02:46,920
+And they'll give you a button right there to build update.
+
+61
+00:02:46,920 --> 00:02:48,240
+I'm not getting it right now.
+
+62
+00:02:48,240 --> 00:02:50,370
+And we may see it at some point within this course
+
+63
+00:02:50,370 --> 00:02:51,960
+as I close and I reopen Excel
+
+64
+00:02:51,960 --> 00:02:54,450
+and Microsoft may be pushing out updates
+
+65
+00:02:54,450 --> 00:02:57,450
+but just keep an eye on that inside of your own interface.
+
+66
+00:02:57,450 --> 00:02:58,590
+Updates are great.
+
+67
+00:02:58,590 --> 00:03:01,980
+Microsoft is fixing things, creating new features for you.
+
+68
+00:03:01,980 --> 00:03:03,030
+It's huge.
+
+69
+00:03:03,030 --> 00:03:04,770
+So, alright, here we are.
+
+70
+00:03:04,770 --> 00:03:07,440
+So typically we start out inside of cell A1
+
+71
+00:03:07,440 --> 00:03:10,890
+within our new worksheet and there I set A1,
+
+72
+00:03:10,890 --> 00:03:13,590
+what better place to put a title?
+
+73
+00:03:13,590 --> 00:03:15,480
+So I'm gonna go ahead and put a title here.
+
+74
+00:03:15,480 --> 00:03:19,020
+I'll call this monthly budget.
+
+75
+00:03:19,020 --> 00:03:21,390
+This is gonna be our monthly budget spreadsheet.
+
+76
+00:03:21,390 --> 00:03:24,570
+And again, I'm just inside of column A, row one
+
+77
+00:03:24,570 --> 00:03:25,830
+type that value in.
+
+78
+00:03:25,830 --> 00:03:27,990
+I'm gonna hit my enter key on my keyboard.
+
+79
+00:03:27,990 --> 00:03:29,970
+That'll hop me out of that cell.
+
+80
+00:03:29,970 --> 00:03:31,500
+All right, so there's my title.
+
+81
+00:03:31,500 --> 00:03:35,040
+We'll worry about making that fancy looking colors
+
+82
+00:03:35,040 --> 00:03:37,590
+and bold and all that stuff. We'll do that later on.
+
+83
+00:03:37,590 --> 00:03:39,540
+For now, we're just gonna put some labels in there
+
+84
+00:03:39,540 --> 00:03:43,680
+and start to build the basic structure of our spreadsheet.
+
+85
+00:03:43,680 --> 00:03:45,810
+So I'm gonna drop down into cell A3
+
+86
+00:03:45,810 --> 00:03:48,330
+and I'm gonna create a column here that's gonna act
+
+87
+00:03:48,330 --> 00:03:50,850
+as the labels for all of the bills
+
+88
+00:03:50,850 --> 00:03:52,830
+that I have for each of the months.
+
+89
+00:03:52,830 --> 00:03:54,480
+So first thing I'm gonna put in here
+
+90
+00:03:54,480 --> 00:03:57,810
+is just a nice header, we'll just call it bills.
+
+91
+00:03:57,810 --> 00:04:00,000
+I'm gonna hit my enter key to drop down a cell again
+
+92
+00:04:00,000 --> 00:04:01,650
+and now I'm gonna create a list.
+
+93
+00:04:01,650 --> 00:04:03,000
+Nice little column here
+
+94
+00:04:03,000 --> 00:04:05,490
+of various bills that I have for each month.
+
+95
+00:04:05,490 --> 00:04:08,460
+Now you can copy me exactly if you liked you.
+
+96
+00:04:08,460 --> 00:04:10,440
+Hopefully you're following along with me, right?
+
+97
+00:04:10,440 --> 00:04:13,350
+You can copy the exact same stuff if you like
+
+98
+00:04:13,350 --> 00:04:16,529
+but I wanna encourage you, one of the base, best ways to
+
+99
+00:04:16,529 --> 00:04:19,589
+learn something new is not only participate in a course
+
+100
+00:04:19,589 --> 00:04:24,300
+like this and to learn, but to put it to practice.
+
+101
+00:04:24,300 --> 00:04:26,790
+So the sooner that you can start to put this
+
+102
+00:04:26,790 --> 00:04:29,760
+into your own real world scenarios
+
+103
+00:04:29,760 --> 00:04:31,380
+the better off you're gonna be.
+
+104
+00:04:31,380 --> 00:04:35,040
+And so think about what bills do you have, right?
+
+105
+00:04:35,040 --> 00:04:37,200
+So here, I'm just gonna make some stuff up.
+
+106
+00:04:37,200 --> 00:04:41,730
+I'm gonna say we got rent, we got phone
+
+107
+00:04:41,730 --> 00:04:46,140
+we got credit cards. Credit.
+
+108
+00:04:46,140 --> 00:04:47,970
+Make sure I spelled that right "Credit cards".
+
+109
+00:04:47,970 --> 00:04:49,320
+Hit my enter key drop down again.
+
+110
+00:04:49,320 --> 00:04:53,640
+Let's say we got food and let's do one more here.
+
+111
+00:04:53,640 --> 00:04:55,620
+I'm gonna say candy.
+
+112
+00:04:55,620 --> 00:04:56,790
+Gotta have candy, right?
+
+113
+00:04:56,790 --> 00:04:59,520
+Each and every month you got your bill for your candy.
+
+114
+00:04:59,520 --> 00:05:01,650
+All right, I'm gonna hit my enter key, I'll drop down.
+
+115
+00:05:01,650 --> 00:05:03,750
+Now that's good. I'm gonna call it good right there.
+
+116
+00:05:03,750 --> 00:05:05,190
+Of course, I've got more inside of there.
+
+117
+00:05:05,190 --> 00:05:06,870
+Maybe we wanna put car in there.
+
+118
+00:05:06,870 --> 00:05:10,980
+You got electricity, you got gas, you got garbage and water
+
+119
+00:05:10,980 --> 00:05:13,350
+you got this, that, and the other thing, right?
+
+120
+00:05:13,350 --> 00:05:16,140
+Whatever bills you have, right?
+
+121
+00:05:16,140 --> 00:05:19,020
+Let's go ahead and create a list there, and eventually we're
+
+122
+00:05:19,020 --> 00:05:22,020
+gonna start to put in the values for each of the
+
+123
+00:05:22,020 --> 00:05:24,520
+months that we're spending on these various bills.
+
+124
+00:05:25,380 --> 00:05:28,380
+Start to start to make you feel kind of bad where all your
+
+125
+00:05:28,380 --> 00:05:30,300
+your money's going, right?
+
+126
+00:05:30,300 --> 00:05:32,670
+Hopefully it's going to candy though, right?
+
+127
+00:05:32,670 --> 00:05:34,110
+All right, down below that, again,
+
+128
+00:05:34,110 --> 00:05:35,460
+I'm just gonna stop it there.
+
+129
+00:05:35,460 --> 00:05:39,060
+I'm gonna put in a total, eventually we're gonna
+
+130
+00:05:39,060 --> 00:05:44,060
+have a row here, right here that's gonna give us some totals
+
+131
+00:05:44,100 --> 00:05:48,840
+for the various months that will have for each of our bills.
+
+132
+00:05:48,840 --> 00:05:52,470
+All right, so these are our row headers, our row labels.
+
+133
+00:05:52,470 --> 00:05:55,440
+Let's go ahead and continue building the structure.
+
+134
+00:05:55,440 --> 00:05:57,660
+I'm gonna jump up into cell B3.
+
+135
+00:05:57,660 --> 00:06:00,270
+I'm just clicking up there and I'm gonna put some labels
+
+136
+00:06:00,270 --> 00:06:02,640
+up here for each of the months.
+
+137
+00:06:02,640 --> 00:06:06,990
+So as of recording right now, it is February of 2019
+
+138
+00:06:06,990 --> 00:06:09,840
+but I'm gonna go ahead and start this out at January.
+
+139
+00:06:09,840 --> 00:06:11,520
+So I'm just gonna type in Jan.
+
+140
+00:06:11,520 --> 00:06:14,640
+If you wanna type out January, feel free
+
+141
+00:06:14,640 --> 00:06:16,110
+you can do that as well.
+
+142
+00:06:16,110 --> 00:06:18,660
+I have a couple of Achilles heels of my own
+
+143
+00:06:18,660 --> 00:06:20,160
+as far as spelling's concerned.
+
+144
+00:06:20,160 --> 00:06:22,380
+My spelling is horrible.
+
+145
+00:06:22,380 --> 00:06:23,610
+My kids come home from school
+
+146
+00:06:23,610 --> 00:06:26,040
+and ask me how to spell something.
+
+147
+00:06:26,040 --> 00:06:29,340
+I open up word, Microsoft Word, and I type it in there.
+
+148
+00:06:29,340 --> 00:06:30,840
+Spell checker, right?
+
+149
+00:06:30,840 --> 00:06:32,010
+It's awesome.
+
+150
+00:06:32,010 --> 00:06:34,230
+So January, February, right?
+
+151
+00:06:34,230 --> 00:06:35,910
+I can never remember how to spell those two.
+
+152
+00:06:35,910 --> 00:06:37,260
+So I'm just gonna abbreviate.
+
+153
+00:06:37,260 --> 00:06:40,200
+I'll say Jan, I'm gonna hit my tab key just to hop
+
+154
+00:06:40,200 --> 00:06:42,180
+over to the right one cell.
+
+155
+00:06:42,180 --> 00:06:46,320
+I'll type in Feb tab and I'll type in Mar March.
+
+156
+00:06:46,320 --> 00:06:47,430
+I'm gonna hit my, actually
+
+157
+00:06:47,430 --> 00:06:49,410
+I'm gonna hit tab key one more time.
+
+158
+00:06:49,410 --> 00:06:50,490
+I'm gonna stop right there
+
+159
+00:06:50,490 --> 00:06:52,800
+for the months and keep it really simple.
+
+160
+00:06:52,800 --> 00:06:55,440
+If you'd like, you can continue going, right?
+
+161
+00:06:55,440 --> 00:06:57,690
+The more practice you get, the better.
+
+162
+00:06:57,690 --> 00:07:00,480
+You can go to April, May, June, July.
+
+163
+00:07:00,480 --> 00:07:02,580
+You can do whatever you like you want to inside of there.
+
+164
+00:07:02,580 --> 00:07:04,620
+You can start at whatever month you want.
+
+165
+00:07:04,620 --> 00:07:06,090
+Again, up to you.
+
+166
+00:07:06,090 --> 00:07:07,410
+But I'm gonna stop right there.
+
+167
+00:07:07,410 --> 00:07:10,140
+And I'm gonna put another total label.
+
+168
+00:07:10,140 --> 00:07:13,920
+Remember we've got this one, we got this guy down here.
+
+169
+00:07:13,920 --> 00:07:16,170
+Let's hit my enter key. Hop outta there.
+
+170
+00:07:16,170 --> 00:07:17,910
+We got that one right there 'cause eventually
+
+171
+00:07:17,910 --> 00:07:22,110
+we're gonna have some a row total here for each column.
+
+172
+00:07:22,110 --> 00:07:23,880
+But then I'm gonna have one here
+
+173
+00:07:23,880 --> 00:07:28,880
+'cause I want to do totals for each of the bills as well.
+
+174
+00:07:29,070 --> 00:07:33,090
+So this right here, this is kind of the basic structure
+
+175
+00:07:33,090 --> 00:07:34,380
+of a spreadsheet.
+
+176
+00:07:34,380 --> 00:07:37,427
+You've got row labels in this case bills
+
+177
+00:07:37,427 --> 00:07:41,253
+you've got column labels representing some type of date.
+
+178
+00:07:42,360 --> 00:07:44,880
+Now there's our basic structure, our labels
+
+179
+00:07:44,880 --> 00:07:47,490
+and these are just text values.
+
+180
+00:07:47,490 --> 00:07:49,650
+So if you're not following along with me
+
+181
+00:07:49,650 --> 00:07:52,710
+step by step right now, go ahead and pause the video.
+
+182
+00:07:52,710 --> 00:07:54,780
+Start to create the basic structure
+
+183
+00:07:54,780 --> 00:07:58,350
+the labels of your Excel monthly budget.
+
+184
+00:07:58,350 --> 00:08:01,500
+So get that part done, pause the video if you need to.
+
+185
+00:08:01,500 --> 00:08:05,100
+Once you're done, jump back in our next lecture.
+
+186
+00:08:05,100 --> 00:08:08,010
+We're gonna start to talk about entering numeric values
+
+187
+00:08:08,010 --> 00:08:10,440
+and putting some currency amounts inside
+
+188
+00:08:10,440 --> 00:08:12,540
+of these months for these bills.
+
+189
+00:08:12,540 --> 00:08:13,500
+So get that done.
+
+190
+00:08:13,500 --> 00:08:15,150
+We'll jump into the next section.
+
